@@ -1,0 +1,9 @@
+{
+  "name": "GFE Invoices",
+  "short_name": "Invoices",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#55559a",
+  "icons": [{ "src": "assets/logo-gfe.png", "sizes": "any", "type": "image/png" }]
+}
