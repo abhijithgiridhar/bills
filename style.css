@@ -60,7 +60,8 @@ table.list tr.click { cursor: pointer; } table.list tr.click:hover { background:
 .r { text-align: right; } .nowrap { white-space: nowrap; }
 .chip { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
 .chip.pending { background: #fff1d6; color: var(--warn); } .chip.partial { background: #e0ecff; color: #2b5bb8; }
-.chip.paid { background: #dcf3e5; color: var(--ok); } .chip.cancelled { background: #eee; color: #888; text-decoration: line-through; }
+.chip.paid { background: #dcf3e5; color: var(--ok); } .chip.draft { background: #e8e8f3; color: #55559a; border: 1px dashed #55559a; }
+.chip.cancelled { background: #eee; color: #888; text-decoration: line-through; }
 .chip.overdue { background: #fde0dc; color: var(--bad); }
 .empty { text-align: center; color: var(--muted); padding: 40px; }
 
@@ -140,3 +141,5 @@ table.list tr.click { cursor: pointer; } table.list tr.click:hover { background:
 .dots i.on { background: var(--purple); }
 .pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 auto 12px; }
 .pad .btn { padding: 14px 0; font-size: 18px; }
+
+.paper .stamp.draft { color: rgba(85, 85, 154, .14); font-size: 100px; }

@@ -46,6 +46,26 @@
       const row = { ...inv, number: n.number, prefix: n.prefix, seq: n.seq }; delete row.id;
       return must(await sb.from('invoices').insert(row).select().single());
     },
+    // Drafts have no invoice number yet: number/prefix/seq stay empty until finalizeDraft().
+    async saveDraft(inv) {
+      const row = { ...inv, status: 'draft', number: null, prefix: null, seq: null }; delete row.id;
+      const { data, error } = await sb.from('invoices').insert(row).select().single();
+      if (error) throw new Error(/null value|violates check/i.test(error.message) ? 'Drafts are not enabled in the database yet. Run supabase/migration-drafts.sql once in the Supabase SQL Editor.' : error.message);
+      return data;
+    },
+    async finalizeDraft(id, patch) {
+      const [n] = must(await sb.rpc('next_invoice_number'));
+      const row = { ...patch, number: n.number, prefix: n.prefix, seq: n.seq, status: 'pending', amount_paid: 0, updated_at: new Date().toISOString() }; delete row.id;
+      const { data, error } = await sb.from('invoices').update(row).eq('id', id).eq('status', 'draft').select();
+      if (error) throw new Error(error.message);
+      if (!data.length) throw new Error('This draft was already finalised or deleted by someone else. Reload the page.');
+      return data[0];
+    },
+    async deleteInvoice(id) { // the database only allows deleting drafts
+      const { data, error } = await sb.from('invoices').delete().eq('id', id).eq('status', 'draft').select();
+      if (error) throw new Error(error.message);
+      if (!data.length) throw new Error('Only drafts can be deleted.');
+    },
     async updateInvoice(id, patch) {
       const row = { ...patch, updated_at: new Date().toISOString() }; delete row.id;
       return must(await sb.from('invoices').update(row).eq('id', id).select().single());

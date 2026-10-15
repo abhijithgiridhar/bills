@@ -20,7 +20,7 @@
   }
   const balance = inv => Math.max(0, Number(inv.total) - Number(inv.amount_paid || 0));
   const isOverdue = inv => ['pending', 'partial'].includes(inv.status) && inv.due_date && inv.due_date < today();
-  const chip = inv => (isOverdue(inv) ? '<span class="chip overdue">Overdue</span> ' : '') + `<span class="chip ${inv.status}">${{ pending: 'Pending', partial: 'Part-paid', paid: 'Paid', cancelled: 'Cancelled' }[inv.status]}</span>`;
+  const chip = inv => (isOverdue(inv) ? '<span class="chip overdue">Overdue</span> ' : '') + `<span class="chip ${inv.status}">${{ draft: 'Draft', pending: 'Pending', partial: 'Part-paid', paid: 'Paid', cancelled: 'Cancelled' }[inv.status]}</span>`;
 
   /* ---------- ui helpers ---------- */
   function toast(msg, err) {
@@ -50,13 +50,13 @@
     if (st.discount_enabled && Number(inv.discount)) extra.push(`<div><span>SUBTOTAL</span><span>${fmt(t.subtotal)}</span></div><div><span>DISCOUNT</span><span>- ${fmt(t.discount)}</span></div>`);
     if (st.gst_enabled && t.tax) extra.push(`<div><span>GST @ ${fmt(inv.tax_rate)}%</span><span>${fmt(t.tax)}</span></div>`);
     return `<div class="paper">
-      ${inv.status === 'cancelled' ? '<div class="stamp">CANCELLED</div>' : ''}
+      ${inv.status === 'cancelled' ? '<div class="stamp">CANCELLED</div>' : inv.status === 'draft' ? '<div class="stamp draft">DRAFT</div>' : ''}
       <div class="body">
         <div class="head">${logo ? `<img src="${esc(logo)}" crossorigin="anonymous" alt="">` : `<div class="nologo">${esc(b.name)}</div>`}
           <div class="title">${esc(b.title_line).replace(/(Plot Twist Games)\s/, '$1<br>')}</div></div>
         <div class="meta">
           <div><div class="lbl">Issued to:</div><div class="txt">${esc(inv.client_name)}${inv.client_address ? '\n' + esc(inv.client_address) : ''}${inv.client_gst ? '\nGST No: ' + esc(inv.client_gst) : ''}</div></div>
-          <div class="no"><div><span class="lbl">Invoice no:</span><b class="v">${esc(inv.number || '—')}</b></div><div><span class="lbl">Date:</span><span class="v">${dmy(inv.issue_date)}</span></div></div>
+          <div class="no"><div><span class="lbl">Invoice no:</span><b class="v">${esc(inv.number || 'DRAFT')}</b></div><div><span class="lbl">Date:</span><span class="v">${dmy(inv.issue_date)}</span></div></div>
         </div>
         <div class="payto"><div class="lbl">Pay to:</div><div class="txt">${esc(st.bank_name)}\nAccount Name: ${esc(st.account_name)}\nAccount No.: ${esc(st.account_no)}\nIFSC Code: ${esc(st.ifsc)}\nGST : ${esc(st.gst_no)}</div></div>
         <table><thead><tr><th>Description</th><th>Unit price</th><th>Qty</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
@@ -96,7 +96,7 @@
       return pdf.output('blob');
     } finally { fr.remove(); }
   }
-  const pdfName = inv => `GFE_Invoice_${inv.number}${inv.status === 'cancelled' ? '_CANCELLED' : ''}.pdf`;
+  const pdfName = inv => inv.status === 'draft' ? `GFE_DRAFT_${(inv.client_name || 'invoice').replace(/[^\w]+/g, '_')}.pdf` : `GFE_Invoice_${inv.number}${inv.status === 'cancelled' ? '_CANCELLED' : ''}.pdf`;
   function saveBlob(blob, name) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   }
@@ -164,10 +164,15 @@
     if (!confirm(`Reset ${inv.number} to unpaid? Recorded payments stay in the log but the balance is cleared.`)) return;
     await DB.updateInvoice(inv.id, { status: 'pending', amount_paid: 0, paid_date: null }); toast('Marked unpaid'); afterChange();
   });
+  const deleteDraft = guard(async inv => {
+    if (!confirm(`Delete this draft${inv.client_name ? ' for ' + inv.client_name : ''}? Drafts have no invoice number, so nothing else is affected.`)) return;
+    await DB.deleteInvoice(inv.id); closeModal(); toast('Draft deleted'); afterChange();
+  });
   function duplicate(inv) { closeModal(); location.hash = '#new/dup/' + inv.id; }
   function actions(inv, small) {
     const c = small ? 'btn sm' : 'btn';
     const out = [];
+    if (inv.status === 'draft') return `<button class="${c} primary" data-act="edit" data-id="${inv.id}">Finalise…</button> <button class="${c} danger" data-act="deldraft" data-id="${inv.id}">Delete</button>`;
     if (['pending', 'partial'].includes(inv.status)) out.push(`<button class="${c} primary" data-act="pay" data-id="${inv.id}">${inv.status === 'partial' ? 'Record payment' : 'Mark paid'}</button>`);
     if (inv.status === 'paid') out.push(`<button class="${c}" data-act="unpay" data-id="${inv.id}">Mark unpaid</button>`);
     if (inv.status === 'cancelled') out.push(`<button class="${c}" data-act="reopen" data-id="${inv.id}">Reopen</button>`);
@@ -179,7 +184,7 @@
       const b = e.target.closest('[data-act]'); if (!b) return;
       e.stopPropagation();
       const inv = S.invoices.find(i => i.id === b.dataset.id); if (!inv) return;
-      ({ pay: paymentModal, cancel: cancelModal, reopen, unpay: markUnpaid, pdf: downloadPDF, print: printInvoice, share: shareInvoice, dup: duplicate,
+      ({ pay: paymentModal, cancel: cancelModal, reopen, unpay: markUnpaid, deldraft: deleteDraft, pdf: downloadPDF, print: printInvoice, share: shareInvoice, dup: duplicate,
          edit: i => { closeModal(); location.hash = '#new/' + i.id; }, view: viewInvoice }[b.dataset.act])(inv);
     };
   }
@@ -187,16 +192,16 @@
   /* ---------- view one invoice ---------- */
   async function viewInvoice(inv) {
     const pays = await DB.listPayments(inv.id);
-    const m = modal(`<div class="bar"><h3 style="margin:0" class="grow">${esc(inv.number)} · ${esc(inv.client_name)} ${chip(inv)}</h3><button class="btn" id="m-close">Close</button></div>
+    const m = modal(`<div class="bar"><h3 style="margin:0" class="grow">${esc(inv.number || 'Draft')} · ${esc(inv.client_name)} ${chip(inv)}</h3><button class="btn" id="m-close">Close</button></div>
       <div class="bar">
-        <button class="btn" data-act="edit" data-id="${inv.id}">Edit</button>
+        ${inv.status === 'draft' ? '' : `<button class="btn" data-act="edit" data-id="${inv.id}">Edit</button>`}
         <button class="btn" data-act="dup" data-id="${inv.id}">Duplicate</button>
         <button class="btn" data-act="pdf" data-id="${inv.id}">Download PDF</button>
         <button class="btn" data-act="print" data-id="${inv.id}">Print</button>
-        <button class="btn" data-act="share" data-id="${inv.id}">Share</button>
+        ${inv.status === 'draft' ? '' : `<button class="btn" data-act="share" data-id="${inv.id}">Share</button>`}
         ${actions(inv)}
       </div>
-      <p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}</p>
+      ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}</p>`}
       ${pays.length ? `<p class="small"><b>Payments:</b> ${pays.map(p => `₹${fmt(p.amount)} on ${dmy(p.paid_on)} (${esc(p.mode || '')}${p.note ? ', ' + esc(p.note) : ''})`).join(' · ')}</p>` : ''}
       <div class="previewwrap"><div class="scale" id="vscale">${paperHTML(inv)}</div></div>`, { wide: true });
     $('#m-close', m).onclick = closeModal;
@@ -211,6 +216,7 @@
     let src = null, isEdit = false;
     if (arg1 === 'dup') src = S.invoices.find(i => i.id === arg2);
     else if (arg1) { src = S.invoices.find(i => i.id === arg1); isEdit = !!src; }
+    const isDraft = !!(isEdit && src.status === 'draft'), isReal = isEdit && !isDraft;
     const def = brandOf();
     E = src ? JSON.parse(JSON.stringify(src)) : {
       brand_id: def.id, client_id: null, client_name: '', client_address: '', client_gst: '', issue_date: today(), due_date: addDays(today(), st.default_due_days),
@@ -220,11 +226,11 @@
       Object.assign(E, { id: undefined, number: undefined, issue_date: today(), due_date: addDays(today(), st.default_due_days), status: 'pending', amount_paid: 0, paid_date: null, cancel_reason: null, imported: false, signed_by: null });
     }
     E.signed_by = isEdit ? (E.signed_by || st.signer_name) : (st.sign_by_login ? S.user.name : st.signer_name);
-    const peek = isEdit ? E.number : await DB.peekNumber();
-    E.number_preview = peek; if (!isEdit) E.number = peek + ' (auto)';
+    const peek = isReal ? E.number : await DB.peekNumber();
+    E.number_preview = peek; if (!isReal) E.number = peek + ' (auto)';
     const cli = S.clients.find(c => c.id === E.client_id) || {};
     $('#view').innerHTML = `<div class="editor"><div class="form">
-      <div class="card"><h3>${isEdit ? 'Edit invoice ' + esc(E.number) : src ? 'Duplicate of ' + esc(src.number) : 'New invoice'}</h3>
+      <div class="card"><h3>${isDraft ? 'Draft' : isEdit ? 'Edit invoice ' + esc(E.number) : src ? 'Duplicate of ' + esc(src.number || 'draft') : 'New invoice'}</h3>
         <div class="row c2"><div><label>Brand</label><select id="f-brand">${S.brands.map(b => `<option value="${b.id}" ${b.id === E.brand_id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select></div>
         <div><label>Invoice no.</label><input id="f-number" value="${esc(E.number)}" disabled></div></div>
         <div class="row c2"><div><label>Invoice date</label><input type="date" id="f-date" value="${E.issue_date}"></div>
@@ -248,7 +254,8 @@
       </div>
       <div class="card"><h3>Notes (printed under the total, optional)</h3><textarea id="f-notes">${esc(E.notes)}</textarea>
         <label>Signed by</label><input id="f-signed" value="${esc(E.signed_by)}"></div>
-      <div class="bar"><button class="btn primary big" id="save">${isEdit ? 'Save changes' : 'Create invoice'}</button><button class="btn" id="discard">Cancel</button></div>
+      <div class="bar">${isReal ? '<button class="btn primary big" id="save">Save changes</button>' : '<button class="btn primary big" id="save">Create invoice</button><button class="btn big" id="save-draft">Save as draft</button>'}${isDraft ? '<button class="btn danger" id="del-draft">Delete draft</button>' : ''}<button class="btn" id="discard">Cancel</button></div>
+      ${isReal ? '' : '<p class="muted small">A draft keeps your work without using an invoice number. The number is assigned when you click Create invoice.</p>'}
     </div>
     <div><div class="bar"><span class="muted small">Live preview</span></div><div class="previewwrap" id="pw"><div class="scale" id="pscale"></div></div></div></div>`;
 
@@ -281,7 +288,7 @@
         else if (k === 'total') it.total = e.target.value === '' ? undefined : Number(e.target.value);
         else { it[k] = e.target.value === '' ? '' : Number(e.target.value); delete it.total; $('[data-k=total]', tr).value = lineTotal(it) || ''; }
       }
-      if (e.target.id === 'f-date' && !isEdit) { $('#f-due').value = addDays($('#f-date').value, st.default_due_days); }
+      if (e.target.id === 'f-date' && !isReal) { $('#f-due').value = addDays($('#f-date').value, st.default_due_days); }
       if (e.target.id === 'f-client') {
         const c = S.clients.find(x => x.name.toLowerCase() === e.target.value.trim().toLowerCase());
         if (c) { E.client_id = c.id; $('#f-addr').value = c.address || ''; $('#f-gst').value = c.gst_no || ''; $('#f-email').value = c.email || ''; $('#f-phone').value = c.phone || ''; $('#client-hint').textContent = 'Existing client loaded.'; }
@@ -295,44 +302,56 @@
       if (d) { E.items.splice(+d.dataset.del, 1); if (!E.items.length) E.items.push({ desc: '', qty: 1, unit: '' }); drawItems(); bind(); }
     });
     $('#discard').onclick = () => (location.hash = isEdit ? '#history' : '#new/x');
-    $('#save').onclick = guard(async () => {
+    const commit = guard(async asDraft => {
       bind();
       if (!E.client_name.trim()) return toast('Enter the client name', true);
-      if (!E.items.some(i => i.desc.trim())) return toast('Add at least one line item', true);
-      if (!E.total && !confirm('Total is 0. Save anyway?')) return;
-      $('#save').disabled = true;
-      const c = await DB.upsertClient({ name: E.client_name.trim(), address: E.client_address, gst_no: E.client_gst, email: $('#f-email').value, phone: $('#f-phone').value });
-      const row = {
-        brand_id: E.brand_id, client_id: c.id, client_name: E.client_name.trim(), client_address: E.client_address, client_gst: E.client_gst,
-        issue_date: E.issue_date, due_date: E.due_date, items: E.items.filter(i => i.desc.trim() || lineTotal(i)), subtotal: E.subtotal, discount: E.discount || 0,
-        tax_rate: E.tax_rate || 0, tax: E.tax || 0, total: E.total, notes: E.notes, signed_by: E.signed_by,
-      };
-      let saved;
-      if (isEdit) {
-        // keep status consistent if the total changed
-        const paid = Number(E.amount_paid || 0);
-        if (E.status !== 'cancelled' && paid > 0) row.status = paid >= row.total ? 'paid' : 'partial';
-        saved = await DB.updateInvoice(E.id, row);
-      } else saved = await DB.createInvoice({ ...row, status: 'pending', amount_paid: 0, created_by: S.user.name });
-      await refresh(); toast(isEdit ? 'Saved' : `Invoice ${saved.number} created`);
-      location.hash = '#history'; setTimeout(() => viewInvoice(S.invoices.find(i => i.id === saved.id)), 50);
+      if (!asDraft && !E.items.some(i => i.desc.trim())) return toast('Add at least one line item', true);
+      if (!asDraft && !E.total && !confirm('Total is 0. Save anyway?')) return;
+      $$('#save, #save-draft, #del-draft').forEach(b => (b.disabled = true));
+      const reenable = () => $$('#save, #save-draft, #del-draft').forEach(b => (b.disabled = false));
+      try {
+        const known = S.clients.find(x => x.name.toLowerCase() === E.client_name.trim().toLowerCase());
+        const c = asDraft ? { id: known ? known.id : null } : await DB.upsertClient({ name: E.client_name.trim(), address: E.client_address, gst_no: E.client_gst, email: $('#f-email').value, phone: $('#f-phone').value });
+        const row = {
+          brand_id: E.brand_id, client_id: c.id, client_name: E.client_name.trim(), client_address: E.client_address, client_gst: E.client_gst,
+          issue_date: E.issue_date, due_date: E.due_date, items: E.items.filter(i => i.desc.trim() || lineTotal(i)), subtotal: E.subtotal, discount: E.discount || 0,
+          tax_rate: E.tax_rate || 0, tax: E.tax || 0, total: E.total, notes: E.notes, signed_by: E.signed_by,
+        };
+        let saved;
+        if (asDraft) {
+          saved = isDraft ? await DB.updateInvoice(E.id, { ...row, status: 'draft' }) : await DB.saveDraft({ ...row, status: 'draft', amount_paid: 0, created_by: S.user.name });
+          await refresh(); toast('Draft saved'); location.hash = '#history'; return;
+        }
+        if (isDraft) saved = await DB.finalizeDraft(E.id, row);
+        else if (isReal) { // keep status consistent if the total changed
+          const paid = Number(E.amount_paid || 0);
+          if (E.status !== 'cancelled' && paid > 0) row.status = paid >= row.total ? 'paid' : 'partial';
+          saved = await DB.updateInvoice(E.id, row);
+        } else saved = await DB.createInvoice({ ...row, status: 'pending', amount_paid: 0, created_by: S.user.name });
+        await refresh(); toast(isReal ? 'Saved' : `Invoice ${saved.number} created`);
+        location.hash = '#history'; setTimeout(() => viewInvoice(S.invoices.find(i => i.id === saved.id)), 50);
+      } catch (e) { reenable(); throw e; }
     });
+    $('#save').onclick = () => commit(false);
+    if ($('#save-draft')) $('#save-draft').onclick = () => commit(true);
+    if ($('#del-draft')) $('#del-draft').onclick = () => deleteDraft(src).then(() => { if (!S.invoices.some(i => i.id === src.id)) location.hash = '#history'; });
     window.onresize = () => $('#pw') && bind();
   }
 
   /* ---------- HISTORY ---------- */
   function viewHistory() {
     $('#view').innerHTML = `<div class="bar"><input id="q" class="grow" placeholder="Search by invoice number or client name…" autofocus>
-      <select id="st"><option value="">All statuses</option><option value="pending">Pending</option><option value="partial">Part-paid</option><option value="paid">Paid</option><option value="cancelled">Cancelled</option><option value="overdue">Overdue</option></select>
+      <select id="st"><option value="">All statuses</option><option value="pending">Pending</option><option value="partial">Part-paid</option><option value="paid">Paid</option><option value="cancelled">Cancelled</option><option value="overdue">Overdue</option><option value="draft">Drafts</option></select>
       <label style="margin:0">From</label><input id="d1" type="date"><label style="margin:0">To</label><input id="d2" type="date">
       <button class="btn" id="clr">Clear</button></div><div id="out"></div>`;
+    if (viewHistory.preset) { $('#st').value = viewHistory.preset; viewHistory.preset = ''; }
     const draw = () => {
       const q = $('#q').value.trim().toLowerCase(), st = $('#st').value, d1 = $('#d1').value, d2 = $('#d2').value;
-      const rows = S.invoices.filter(i => (!q || i.number.toLowerCase().includes(q) || i.client_name.toLowerCase().includes(q))
+      const rows = S.invoices.slice().sort((a, b) => (b.status === 'draft') - (a.status === 'draft')).filter(i => (!q || (i.number || '').toLowerCase().includes(q) || i.client_name.toLowerCase().includes(q))
         && (!st || (st === 'overdue' ? isOverdue(i) : i.status === st)) && (!d1 || i.issue_date >= d1) && (!d2 || i.issue_date <= d2));
       $('#out').innerHTML = rows.length ? `<table class="list"><tr><th>Invoice</th><th>Date</th><th>Client</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th><th></th></tr>${rows.map(i => `
-        <tr class="click" data-act="view" data-id="${i.id}"><td class="nowrap"><b>${esc(i.number)}</b></td><td class="nowrap">${dmy(i.issue_date)}</td><td>${esc(i.client_name)}</td>
-        <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap">${i.status === 'cancelled' ? '—' : '₹' + fmt(balance(i))}</td><td class="nowrap">${chip(i)}</td>
+        <tr class="click" data-act="view" data-id="${i.id}"><td class="nowrap"><b>${esc(i.number || 'Draft')}</b></td><td class="nowrap">${dmy(i.issue_date)}</td><td>${esc(i.client_name)}</td>
+        <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap">${['cancelled', 'draft'].includes(i.status) ? '—' : '₹' + fmt(balance(i))}</td><td class="nowrap">${chip(i)}</td>
         <td class="r nowrap">${actions(i, true)}</td></tr>`).join('')}</table><p class="muted small">${rows.length} invoice${rows.length === 1 ? '' : 's'}</p>` : '<div class="empty">No invoices match.</div>';
     };
     $('#view').oninput = draw; $('#view').onchange = draw;
@@ -345,7 +364,8 @@
     const rows = S.invoices.filter(i => ['pending', 'partial'].includes(i.status))
       .sort((a, b) => (a.due_date || a.issue_date).localeCompare(b.due_date || b.issue_date));
     const out = rows.reduce((a, i) => a + balance(i), 0), over = rows.filter(isOverdue);
-    $('#view').innerHTML = `<div class="stats"><div class="stat"><div class="n">₹${fmt(out)}</div><div class="l">Outstanding across ${rows.length} bill${rows.length === 1 ? '' : 's'}</div></div>
+    const nd = S.invoices.filter(i => i.status === 'draft').length;
+    $('#view').innerHTML = `${nd ? `<p class="muted">You have <a href="#history" id="to-drafts">${nd} draft${nd === 1 ? '' : 's'}</a> waiting to be finalised.</p>` : ''}<div class="stats"><div class="stat"><div class="n">₹${fmt(out)}</div><div class="l">Outstanding across ${rows.length} bill${rows.length === 1 ? '' : 's'}</div></div>
       <div class="stat"><div class="n" style="color:var(--bad)">₹${fmt(over.reduce((a, i) => a + balance(i), 0))}</div><div class="l">Overdue (${over.length} bill${over.length === 1 ? '' : 's'})</div></div></div>
       ${rows.length ? `<table class="list"><tr><th>Invoice</th><th>Date</th><th>Client</th><th>Due</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th><th></th></tr>${rows.map(i => {
         const late = isOverdue(i) ? Math.round((new Date(today()) - new Date(i.due_date)) / 864e5) : 0;
@@ -353,15 +373,16 @@
         <td class="nowrap">${i.due_date ? dmy(i.due_date) + (late ? ` <span class="small" style="color:var(--bad)">(${late}d late)</span>` : '') : '<span class="muted">—</span>'}</td>
         <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap"><b>₹${fmt(balance(i))}</b></td><td class="nowrap">${chip(i)}</td><td class="r nowrap">${actions(i, true)}</td></tr>`;
       }).join('')}</table>` : '<div class="empty">Nothing pending. All bills are settled.</div>'}`;
+    if ($('#to-drafts')) $('#to-drafts').onclick = () => { viewHistory.preset = 'draft'; };
     wireActions($('#view'));
   }
 
   /* ---------- DASHBOARD ---------- */
   function viewDashboard() {
-    const fys = [...new Set(S.invoices.map(i => i.prefix))].sort().reverse();
+    const fys = [...new Set(S.invoices.filter(i => i.prefix).map(i => i.prefix))].sort().reverse();
     const cur = viewDashboard.fy && fys.includes(viewDashboard.fy) ? viewDashboard.fy : fys[0];
     viewDashboard.fy = cur;
-    const live = S.invoices.filter(i => i.prefix === cur && i.status !== 'cancelled');
+    const live = S.invoices.filter(i => i.prefix === cur && !['cancelled', 'draft'].includes(i.status));
     const billed = live.reduce((a, i) => a + Number(i.total), 0), got = live.reduce((a, i) => a + Number(i.amount_paid || 0), 0);
     const ym = today().slice(0, 7), month = live.filter(i => i.issue_date.startsWith(ym)).reduce((a, i) => a + Number(i.total), 0);
     const startYear = 2000 + Number((cur || '2726').slice(2));
@@ -454,7 +475,7 @@
       S.brands = await DB.listBrands(); drawBrands(); toast('Brand saved');
     });
     $('#add-brand').onclick = guard(async () => { await DB.saveBrand({ name: 'New brand', title_line: S.settings.signer_company, email: '', phone: '', footer_text: '', is_default: false }); S.brands = await DB.listBrands(); drawBrands(); });
-    const range = () => S.invoices.filter(i => (!$('#x1').value || i.issue_date >= $('#x1').value) && (!$('#x2').value || i.issue_date <= $('#x2').value) && ($('#x-canc').checked || i.status !== 'cancelled'));
+    const range = () => S.invoices.filter(i => (!$('#x1').value || i.issue_date >= $('#x1').value) && (!$('#x2').value || i.issue_date <= $('#x2').value) && i.status !== 'draft' && ($('#x-canc').checked || i.status !== 'cancelled'));
     $('#x-csv').onclick = () => {
       const rows = range().slice().sort((a, b) => a.issue_date.localeCompare(b.issue_date) || a.seq - b.seq); if (!rows.length) return toast('No invoices in that range', true);
       const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
