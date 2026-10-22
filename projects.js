@@ -59,7 +59,7 @@
       $('#out').innerHTML = `<div class="kpis"><div class="kpi"><div class="l">Income (${basisName()})</div><div class="n">${rs(tot.income)}</div><div class="s">${rows.length} project${rows.length === 1 ? '' : 's'}</div></div>
         <div class="kpi"><div class="l">Costs</div><div class="n">${rs(tot.cost)}</div></div>
         <div class="kpi big"><div class="l">Profit / loss</div><div class="n ${cls(tp)}">${rs(tp)}</div><div class="s ${cls(tp)}">${pct(tm)} margin</div></div></div>
-        ${rows.length ? `<table class="list"><tr><th>Project</th><th>Status</th><th class="r">Income</th><th class="r">Costs</th><th class="r">Profit / loss</th><th class="r">Margin</th><th>Budget used</th></tr>${rows.map(({ p, c }) => { const k = pick(c);
+        ${rows.length ? `<table class="list rtable"><tr><th data-title>Project</th><th>Status</th><th class="r">Income</th><th class="r">Costs</th><th class="r">Profit / loss</th><th class="r">Margin</th><th>Budget used</th></tr>${rows.map(({ p, c }) => { const k = pick(c);
           return `<tr class="click" data-id="${p.id}"><td><b>${esc(p.name)}</b><div class="small muted">${esc(p.client_name || '')}</div></td><td>${chip(p.status)}</td>
           <td class="r nowrap">${rs(k.income)}</td><td class="r nowrap">${rs(c.cost)}</td><td class="r nowrap ${cls(k.profit)}"><b>${rs(k.profit)}</b></td><td class="r nowrap ${cls(k.profit)}">${pct(k.margin)}</td>
           <td style="min-width:130px">${p.budget > 0 ? `${meter(c.cost, p.budget)}<div class="small muted">${rs(c.cost)} of ${rs(p.budget)}</div>` : '<span class="muted small">no budget</span>'}</td></tr>`; }).join('')}</table>`
@@ -84,7 +84,7 @@
         <div class="kpi"><div class="l">Total costs</div><div class="n">${rs(c.cost)}</div><div class="s">incl. team time ${rs(c.labour)}</div></div>
         <div class="kpi big"><div class="l">Profit / loss</div><div class="n ${cls(k.profit)}">${rs(k.profit)}</div><div class="s ${cls(k.profit)}">on ${basisName()} income</div></div>
         <div class="kpi big"><div class="l">Margin</div><div class="n ${cls(k.profit)}">${pct(k.margin)}</div><div class="s">profit ÷ income</div></div></div>
-      <div class="card"><table class="compare"><tr><th></th><th>Income</th><th>Costs</th><th>Profit / loss</th><th>Margin</th></tr>
+      <div class="card"><table class="compare rtable"><tr><th data-title></th><th>Income</th><th>Costs</th><th>Profit / loss</th><th>Margin</th></tr>
         <tr><td><b>If you count what's received</b></td><td>${rs(c.received)}</td><td>${rs(c.cost)}</td><td class="${cls(c.profitReceived)}"><b>${rs(c.profitReceived)}</b></td><td class="${cls(c.profitReceived)}">${pct(c.marginReceived)}</td></tr>
         <tr><td><b>If you count what's billed</b></td><td>${rs(c.billed)}</td><td>${rs(c.cost)}</td><td class="${cls(c.profitBilled)}"><b>${rs(c.profitBilled)}</b></td><td class="${cls(c.profitBilled)}">${pct(c.marginBilled)}</td></tr>
         ${p.contract_value > 0 ? `<tr><td><b>At full contract value</b></td><td>${rs(p.contract_value)}</td><td>${rs(c.cost)}</td><td class="${cls(p.contract_value - c.cost)}"><b>${rs(p.contract_value - c.cost)}</b></td><td class="${cls(p.contract_value - c.cost)}">${pct(((p.contract_value - c.cost) / p.contract_value) * 100)}</td></tr>` : ''}</table>
@@ -93,12 +93,12 @@
         ${p.budget > 0 ? `<div class="catrow"><b>Total budget</b>${meter(c.cost, p.budget)}<span class="${c.cost > p.budget ? 'neg' : ''}">${rs(c.cost)} of ${rs(p.budget)}${c.cost > p.budget ? ' — over by ' + rs(c.cost - p.budget) : ' — ' + rs(p.budget - c.cost) + ' left'}</span></div>` : ''}
         ${cats.map(x => { const b = Number((p.category_budgets || {})[x]) || 0, s = c.byCat[x] || 0; return `<div class="catrow"><span>${esc(x)}</span>${b > 0 ? meter(s, b) : '<span class="muted small">no budget set</span>'}<span class="${b > 0 && s > b ? 'neg' : ''}">${rs(s)}${b > 0 ? ' of ' + rs(b) : ''}</span></div>`; }).join('')}</div>` : ''}
       <div class="sect"><h3>Money in</h3><span class="grow"></span><button class="btn sm" id="link">Link invoices</button><button class="btn sm" id="add-inc">+ Other income</button></div>
-      <div class="card" style="padding:0">${c.inv.length || c.manual.length ? `<table class="list" style="border:0"><tr><th>Source</th><th>Date</th><th class="r">Billed</th><th class="r">Received</th><th>Status</th><th></th></tr>
+      <div class="card" style="padding:0">${c.inv.length || c.manual.length ? `<table class="list rtable" style="border:0"><tr><th data-title>Source</th><th>Date</th><th class="r">Billed</th><th class="r">Received</th><th>Status</th><th></th></tr>
         ${c.inv.map(i => `<tr><td><b>Invoice ${esc(i.number)}</b><div class="small muted">${esc(i.client_name)}</div></td><td class="nowrap">${dmy(i.issue_date)}</td><td class="r nowrap">${rs(i.total)}</td><td class="r nowrap">${rs(receivedOf(i))}</td><td><span class="chip ${i.status}">${i.status === 'partial' ? 'Part-paid' : i.status[0].toUpperCase() + i.status.slice(1)}</span></td><td class="r"><button class="btn sm" data-unlink="${i.id}">Unlink</button></td></tr>`).join('')}
         ${c.manual.map(i => `<tr><td><b>${esc(i.source || 'Other income')}</b><div class="small muted">${esc([i.mode, i.notes].filter(Boolean).join(' · '))}</div></td><td class="nowrap">${dmy(i.received_on)}</td><td class="r nowrap">${rs(i.amount)}</td><td class="r nowrap">${rs(i.amount)}</td><td><span class="tag">Manual</span></td><td class="r nowrap"><button class="btn sm" data-edit-inc="${i.id}">Edit</button> <button class="btn sm danger" data-del-inc="${i.id}">Delete</button></td></tr>`).join('')}</table>` : '<div class="empty" style="padding:22px">No income yet. Link an invoice you have raised, or add other income.</div>'}</div>
       <div class="sect"><h3>Spends &amp; team time</h3><span class="grow"></span><button class="btn sm primary" id="add-exp">+ Add spend</button><button class="btn sm" id="add-time">+ Log team time</button></div>
       ${cats.length > 1 ? `<div class="filters"><button data-cat="" class="${!cf ? 'on' : ''}">All</button>${[...new Set(c.ex.map(e => e.category))].map(x => `<button data-cat="${esc(x)}" class="${cf === x ? 'on' : ''}">${esc(x)}</button>`).join('')}</div>` : ''}
-      <div class="card" style="padding:0">${exRows.length ? `<table class="list" style="border:0"><tr><th>Date</th><th>What</th><th>Category</th><th>Paid by</th><th class="r">Amount</th><th></th></tr>
+      <div class="card" style="padding:0">${exRows.length ? `<table class="list rtable" style="border:0"><tr><th>Date</th><th data-title>What</th><th>Category</th><th>Paid by</th><th class="r">Amount</th><th></th></tr>
         ${exRows.map(e => `<tr><td class="nowrap">${dmy(e.spent_on)}</td><td><b>${esc(e.kind === 'labour' ? e.person : e.vendor || e.description || '—')}</b>${e.kind === 'labour' ? '<span class="tag time">Time</span>' : ''}
           <div class="small muted">${esc(e.kind === 'labour' ? `${fmt(e.units)} ${e.unit_label}${e.units == 1 ? '' : 's'} × ${rs(e.rate)}${e.description ? ' · ' + e.description : ''}` : [e.vendor && e.description ? e.description : '', e.notes].filter(Boolean).join(' · '))}</div></td>
           <td>${esc(e.category)}</td><td class="nowrap">${e.kind === 'labour' ? '<span class="muted">—</span>' : esc(e.paid_by) + (e.paid_by !== 'Company' ? (e.reimbursed ? '<span class="tag ok">Repaid</span>' : '<span class="tag owed">Owed</span>') : '')}</td>
@@ -255,7 +255,7 @@
         <div class="card"><h3>Spend categories</h3><p class="muted small">The choices in the Category dropdown. Renaming a category here does not change spends already saved under the old name.</p>${list('cats', cats, 'Category')}<button class="btn sm" id="add-cat">+ Add category</button></div>
         <div class="card"><h3>Who can pay</h3><p class="muted small">The Paid by dropdown. Keep <b>Company</b>. Anyone else paying out of pocket shows up as money owed back.</p>${list('payers', payers, 'Name')}<button class="btn sm" id="add-payer">+ Add person</button></div>
         <div class="card"><h3>Team time rates</h3><p class="muted small">Default rate when you log time. You can still change it on each entry.</p>
-          ${people.map((x, n) => `<div class="row c3" style="grid-template-columns:1fr 130px 150px 40px;margin:4px 0"><input data-pn="${n}" value="${esc(x.name)}" placeholder="Name"><select data-pu="${n}">${['hour', 'day', 'week', 'session'].map(u => `<option ${u === x.unit ? 'selected' : ''}>${u}</option>`).join('')}</select><input data-pr="${n}" type="number" min="0" value="${x.rate || ''}" placeholder="₹ rate"><button class="btn sm danger" data-prm="${n}">×</button></div>`).join('')}<button class="btn sm" id="add-person">+ Add person</button></div>
+          ${people.map((x, n) => `<div class="row c3 prow" style="grid-template-columns:1fr 130px 150px 40px;margin:4px 0"><input data-pn="${n}" value="${esc(x.name)}" placeholder="Name"><select data-pu="${n}">${['hour', 'day', 'week', 'session'].map(u => `<option ${u === x.unit ? 'selected' : ''}>${u}</option>`).join('')}</select><input data-pr="${n}" type="number" min="0" value="${x.rate || ''}" placeholder="₹ rate"><button class="btn sm danger" data-prm="${n}">×</button></div>`).join('')}<button class="btn sm" id="add-person">+ Add person</button></div>
         <div class="bar"><button class="btn primary" id="save">Save settings</button></div>`;
       $('#view').oninput = e => { const t = e.target; if (t.dataset.v !== undefined) (t.closest('#cats') ? cats : payers)[+t.dataset.v] = t.value; if (t.dataset.pn !== undefined) people[+t.dataset.pn].name = t.value; if (t.dataset.pr !== undefined) people[+t.dataset.pr].rate = Number(t.value) || 0; if (t.dataset.pu !== undefined) people[+t.dataset.pu].unit = t.value; };
       $('#view').onclick = guard(async e => {
@@ -272,6 +272,16 @@
     };
     draw();
   }
+
+  /* On phones, .rtable tables become stacked cards. Each cell is labelled from its column header. */
+  function labelTables() {
+    $$('table.rtable').forEach(t => {
+      const rows = $$('tr', t), ths = $$('th', rows[0] || t);
+      rows.slice(1).forEach(tr => { const tds = $$(':scope > td', tr), span = tds.some(td => td.colSpan > 1);
+        tds.forEach((td, i) => { if (span) td.dataset.l = ''; else if (ths[i] && !ths[i].hasAttribute('data-title')) td.dataset.l = ths[i].textContent.trim(); }); });
+    });
+  }
+  new MutationObserver(() => labelTables()).observe(document.getElementById('view'), { childList: true, subtree: true });
 
   /* ---------- router + boot ---------- */
   function route() {
