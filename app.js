@@ -122,6 +122,7 @@
   /* ---------- data refresh ---------- */
   const refresh = async () => {
     [S.settings, S.brands, S.clients, S.invoices] = await Promise.all([DB.getSettings(), DB.listBrands(), DB.listClients(), DB.listInvoices()]);
+    try { S.projects = await DB.listProjectsLite(); } catch { S.projects = null; } // null = project tables not set up yet
     const n = S.invoices.filter(i => ['pending', 'partial'].includes(i.status)).length;
     $('#pending-count').textContent = n || '';
   };
@@ -201,7 +202,7 @@
         ${inv.status === 'draft' ? '' : `<button class="btn" data-act="share" data-id="${inv.id}">Share</button>`}
         ${actions(inv)}
       </div>
-      ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}</p>`}
+      ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
       ${pays.length ? `<p class="small"><b>Payments:</b> ${pays.map(p => `₹${fmt(p.amount)} on ${dmy(p.paid_on)} (${esc(p.mode || '')}${p.note ? ', ' + esc(p.note) : ''})`).join(' · ')}</p>` : ''}
       <div class="previewwrap"><div class="scale" id="vscale">${paperHTML(inv)}</div></div>`, { wide: true });
     $('#m-close', m).onclick = closeModal;
@@ -233,6 +234,7 @@
       <div class="card"><h3>${isDraft ? 'Draft' : isEdit ? 'Edit invoice ' + esc(E.number) : src ? 'Duplicate of ' + esc(src.number || 'draft') : 'New invoice'}</h3>
         <div class="row c2"><div><label>Brand</label><select id="f-brand">${S.brands.map(b => `<option value="${b.id}" ${b.id === E.brand_id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select></div>
         <div><label>Invoice no.</label><input id="f-number" value="${esc(E.number)}" disabled></div></div>
+        ${S.projects && S.projects.length ? `<label>Project (optional, for the cost tracker)</label><select id="f-project"><option value="">— none —</option>${S.projects.map(p => `<option value="${p.id}" ${p.id === E.project_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
         <div class="row c2"><div><label>Invoice date</label><input type="date" id="f-date" value="${E.issue_date}"></div>
         <div><label>Due date</label><input type="date" id="f-due" value="${E.due_date || ''}"></div></div>
       </div>
@@ -262,7 +264,7 @@
     const bind = () => {
       E.brand_id = $('#f-brand').value; E.issue_date = $('#f-date').value; E.due_date = $('#f-due').value || null;
       E.client_name = $('#f-client').value; E.client_address = $('#f-addr').value; E.client_gst = $('#f-gst').value;
-      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value;
+      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value; if ($('#f-project')) E.project_id = $('#f-project').value || null;
       if ($('#f-disc')) E.discount = Number($('#f-disc').value) || 0;
       if ($('#f-tax')) E.tax_rate = Number($('#f-tax').value) || 0;
       const t = totals(E); Object.assign(E, { subtotal: t.subtotal, tax: t.tax, total: t.total });
@@ -317,6 +319,7 @@
           issue_date: E.issue_date, due_date: E.due_date, items: E.items.filter(i => i.desc.trim() || lineTotal(i)), subtotal: E.subtotal, discount: E.discount || 0,
           tax_rate: E.tax_rate || 0, tax: E.tax || 0, total: E.total, notes: E.notes, signed_by: E.signed_by,
         };
+        if (S.projects !== null) row.project_id = E.project_id || null; // only once the project tables exist
         let saved;
         if (asDraft) {
           saved = isDraft ? await DB.updateInvoice(E.id, { ...row, status: 'draft' }) : await DB.saveDraft({ ...row, status: 'draft', amount_paid: 0, created_by: S.user.name });
@@ -518,7 +521,7 @@
     if (!me) { $('#login').hidden = false; return; }
     if (me.denied) { $('#login').hidden = false; $('#login-msg').textContent = `${me.denied} is not authorised for this tool.`; return; }
     S.user = me; $('#who').textContent = me.name;
-    $('#demo-banner').hidden = !DB.demo;
+    $('#demo-banner').hidden = !DB.demo; if (DB.demo) $('#proj-link').href = 'projects.html?demo=1';
     try { await refresh(); } catch (e) { $('#login').hidden = false; $('#login-msg').textContent = 'Could not load data: ' + e.message; return; }
     $('#app').hidden = false; window.addEventListener('hashchange', route); route();
   }

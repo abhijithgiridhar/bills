@@ -5,6 +5,7 @@
 
   window.DB = {
     demo: false,
+    sb, // shared with projects-data.js so both pages use one auth session
 
     async init() {
       const { data: { session } } = await sb.auth.getSession();
@@ -71,6 +72,11 @@
       return must(await sb.from('invoices').update(row).eq('id', id).select().single());
     },
 
+    // Used by the invoice editor's optional Project dropdown. Returns null if the project tables are not set up yet.
+    async listProjectsLite() {
+      const { data, error } = await sb.from('projects').select('id,name,status').order('name');
+      return error ? null : data;
+    },
     async listPayments(invoiceId) { return must(await sb.from('payments').select('*').eq('invoice_id', invoiceId).order('paid_on')); },
     async recordPayment(inv, p, by) {
       must(await sb.from('payments').insert({ invoice_id: inv.id, amount: p.amount, paid_on: p.paid_on, mode: p.mode, note: p.note, recorded_by: by }));
