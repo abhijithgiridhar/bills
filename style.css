@@ -158,3 +158,27 @@ table.list tr.click { cursor: pointer; } table.list tr.click:hover { background:
   .stats { grid-template-columns: 1fr 1fr; }
   html, body { overflow-x: hidden; }
 }
+
+/* ---------- follow-ups ---------- */
+.fu { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; min-width: 190px; max-width: 280px; }
+.fu .small { line-height: 1.35; } .fu a { color: var(--purple); text-decoration: none; font-weight: 600; }
+.tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 8px; background: #eef; color: var(--purple); }
+.tag.owed { background: #fbdcd8; color: var(--bad); }
+.sect2 { margin: 16px 0 2px; }
+.notelog { max-height: 220px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--line); }
+.note { padding: 8px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+@media (max-width: 700px) {
+  table.rtable { display: block; border: 0; background: none; border-radius: 0; }
+  table.rtable tbody { display: block; }
+  table.rtable tr:first-child { display: none; }
+  table.rtable tr { display: flex; flex-direction: column; background: #fff; border: 1px solid var(--line); border-radius: 12px; margin: 0 0 10px; padding: 10px 12px; }
+  table.rtable td { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 4px 0; border: 0; text-align: right; }
+  table.rtable td[data-l]::before { content: attr(data-l); color: var(--muted); font-size: 12px; font-weight: 600; text-align: left; flex: none; margin-right: auto; }
+  table.rtable td[data-l=""]::before { content: none; }
+  table.rtable td[data-l=""], table.rtable td:last-child { justify-content: flex-end; flex-wrap: wrap; }
+  table.rtable td:not([data-l]) { order: -1; display: block; text-align: left; padding-bottom: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  table.rtable td:empty { display: none; }
+  table.rtable td.fu-td { flex-direction: column; align-items: flex-start; text-align: left; }
+  table.rtable td.fu-td::before { margin-right: 0; margin-bottom: 2px; }
+  .fu { max-width: none; width: 100%; }
+}

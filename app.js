@@ -123,6 +123,7 @@
   const refresh = async () => {
     [S.settings, S.brands, S.clients, S.invoices] = await Promise.all([DB.getSettings(), DB.listBrands(), DB.listClients(), DB.listInvoices()]);
     try { S.projects = await DB.listProjectsLite(); } catch { S.projects = null; } // null = project tables not set up yet
+    try { S.notes = await DB.listInvoiceNotes(); S.team = await DB.listTeam(); } catch { S.notes = null; } // null = follow-up tables not set up yet
     const n = S.invoices.filter(i => ['pending', 'partial'].includes(i.status)).length;
     $('#pending-count').textContent = n || '';
   };
@@ -182,12 +183,56 @@
   }
   function wireActions(root) {
     root.onclick = e => {
+      if (e.target.closest('[data-stop]')) return;
       const b = e.target.closest('[data-act]'); if (!b) return;
       e.stopPropagation();
       const inv = S.invoices.find(i => i.id === b.dataset.id); if (!inv) return;
-      ({ pay: paymentModal, cancel: cancelModal, reopen, unpay: markUnpaid, deldraft: deleteDraft, pdf: downloadPDF, print: printInvoice, share: shareInvoice, dup: duplicate,
+      ({ pay: paymentModal, cancel: cancelModal, reopen, unpay: markUnpaid, follow: followModal, deldraft: deleteDraft, pdf: downloadPDF, print: printInvoice, share: shareInvoice, dup: duplicate,
          edit: i => { closeModal(); location.hash = '#new/' + i.id; }, view: viewInvoice }[b.dataset.act])(inv);
     };
+  }
+
+  /* ---------- follow-ups: owner tag, client contact (POC), notes log, next follow-up ---------- */
+  const notesOf = inv => (S.notes || []).filter(n => n.invoice_id === inv.id);
+  const followDue = inv => !!inv.next_follow_up && inv.next_follow_up <= today();
+  const telOf = p => String(p || '').replace(/[^\d+]/g, '');
+  const snip = (t, n = 70) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
+  function followCell(inv) {
+    const last = notesOf(inv)[0], bits = [];
+    if (inv.follow_up_owner) bits.push(`<span class="tag">${esc(inv.follow_up_owner)}</span>`);
+    if (inv.next_follow_up) bits.push(`<span class="tag ${followDue(inv) ? 'owed' : ''}">${followDue(inv) ? 'Chase due ' : 'Chase '}${dmy(inv.next_follow_up)}</span>`);
+    const poc = inv.poc_name || inv.poc_phone || inv.poc_email
+      ? `<div class="small">POC: <b>${esc(inv.poc_name || '')}</b> ${inv.poc_phone ? `<a href="tel:${esc(telOf(inv.poc_phone))}" data-stop>${esc(inv.poc_phone)}</a>` : ''} ${inv.poc_email ? `<a href="mailto:${esc(inv.poc_email)}" data-stop>✉</a>` : ''}</div>` : '';
+    return `<div class="fu">${bits.join(' ')}${poc}${last ? `<div class="small muted" title="${esc(last.note)}">“${esc(snip(last.note))}” · ${dmy(last.noted_on)}${last.author ? ' · ' + esc(last.author) : ''}</div>` : ''}
+      <button class="btn sm" data-act="follow" data-id="${inv.id}">${bits.length || poc || last ? 'Update follow-up' : '+ Follow-up'}</button></div>`;
+  }
+  function followModal(inv) {
+    const team = S.team || [];
+    const sameClient = S.invoices.filter(i => i.id !== inv.id && i.client_name === inv.client_name && (i.poc_name || i.poc_phone || i.poc_email)).sort((a, b) => b.issue_date.localeCompare(a.issue_date))[0];
+    const m = modal(`<h3>Follow-up — ${esc(inv.number)} · ${esc(inv.client_name)}</h3>
+      <p class="muted small">Total ₹${fmt(inv.total)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}</p>
+      <div class="row c2"><div><label>Who is chasing this</label><select id="f-owner"><option value="">— nobody yet —</option>${team.map(t => `<option ${t === inv.follow_up_owner ? 'selected' : ''}>${esc(t)}</option>`).join('')}${inv.follow_up_owner && !team.includes(inv.follow_up_owner) ? `<option selected>${esc(inv.follow_up_owner)}</option>` : ''}</select></div>
+        <div><label>Next follow-up on</label><input id="f-next" type="date" value="${inv.next_follow_up || ''}"></div></div>
+      <div class="sect2"><b>Client contact (POC) for this invoice</b> ${sameClient ? '<button class="link small" id="f-copy" style="margin-left:8px">Copy from their latest invoice</button>' : ''}</div>
+      <div class="row c3"><div><label>Name</label><input id="f-pn" value="${esc(inv.poc_name || '')}"></div><div><label>Phone</label><input id="f-pp" type="tel" value="${esc(inv.poc_phone || '')}"></div><div><label>Email</label><input id="f-pe" type="email" value="${esc(inv.poc_email || '')}"></div></div>
+      <div class="sect2"><b>Conversation notes</b></div>
+      <textarea id="f-note" rows="2" placeholder="What was said? e.g. Called Rahul, promised payment by Friday"></textarea>
+      <div class="row c2"><div><label>Date of this conversation</label><input id="f-nd" type="date" value="${today()}"></div><div></div></div>
+      <div id="f-log"></div>
+      <div class="foot"><button class="btn" id="m-x">Close</button><button class="btn primary" id="m-ok">Save</button></div>`);
+    const drawLog = () => {
+      const ns = notesOf(inv);
+      $('#f-log', m).innerHTML = ns.length ? `<div class="notelog">${ns.map(n => `<div class="note"><div class="small muted">${dmy(n.noted_on)}${n.author ? ' · ' + esc(n.author) : ''} <button class="link small" data-delnote="${n.id}" style="color:var(--bad);margin-left:6px">delete</button></div><div>${esc(n.note)}</div></div>`).join('')}</div>` : '<p class="muted small">No notes yet.</p>';
+    };
+    drawLog();
+    $('#f-log', m).onclick = guard(async e => { const id = e.target.dataset.delnote; if (!id || !confirm('Delete this note?')) return; await DB.deleteInvoiceNote(id); S.notes = await DB.listInvoiceNotes(); drawLog(); });
+    if ($('#f-copy', m)) $('#f-copy', m).onclick = () => { $('#f-pn', m).value = sameClient.poc_name || ''; $('#f-pp', m).value = sameClient.poc_phone || ''; $('#f-pe', m).value = sameClient.poc_email || ''; };
+    $('#m-x', m).onclick = closeModal;
+    $('#m-ok', m).onclick = guard(async () => {
+      await DB.updateInvoice(inv.id, { follow_up_owner: $('#f-owner', m).value || null, next_follow_up: $('#f-next', m).value || null, poc_name: $('#f-pn', m).value.trim() || null, poc_phone: $('#f-pp', m).value.trim() || null, poc_email: $('#f-pe', m).value.trim() || null });
+      const note = $('#f-note', m).value.trim(); if (note) await DB.addInvoiceNote(inv.id, note, $('#f-nd', m).value || today(), S.user.name);
+      closeModal(); toast('Follow-up saved'); await afterChange();
+    });
   }
 
   /* ---------- view one invoice ---------- */
@@ -200,6 +245,7 @@
         <button class="btn" data-act="pdf" data-id="${inv.id}">Download PDF</button>
         <button class="btn" data-act="print" data-id="${inv.id}">Print</button>
         ${inv.status === 'draft' ? '' : `<button class="btn" data-act="share" data-id="${inv.id}">Share</button>`}
+        ${inv.status === 'draft' || S.notes === null ? '' : `<button class="btn" data-act="follow" data-id="${inv.id}">Follow-up</button>`}
         ${actions(inv)}
       </div>
       ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
@@ -352,7 +398,7 @@
       const q = $('#q').value.trim().toLowerCase(), st = $('#st').value, d1 = $('#d1').value, d2 = $('#d2').value;
       const rows = S.invoices.slice().sort((a, b) => (b.status === 'draft') - (a.status === 'draft')).filter(i => (!q || (i.number || '').toLowerCase().includes(q) || i.client_name.toLowerCase().includes(q))
         && (!st || (st === 'overdue' ? isOverdue(i) : i.status === st)) && (!d1 || i.issue_date >= d1) && (!d2 || i.issue_date <= d2));
-      $('#out').innerHTML = rows.length ? `<table class="list"><tr><th>Invoice</th><th>Date</th><th>Client</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th><th></th></tr>${rows.map(i => `
+      $('#out').innerHTML = rows.length ? `<table class="list rtable"><tr><th data-title>Invoice</th><th>Date</th><th>Client</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th><th></th></tr>${rows.map(i => `
         <tr class="click" data-act="view" data-id="${i.id}"><td class="nowrap"><b>${esc(i.number || 'Draft')}</b></td><td class="nowrap">${dmy(i.issue_date)}</td><td>${esc(i.client_name)}</td>
         <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap">${['cancelled', 'draft'].includes(i.status) ? '—' : '₹' + fmt(balance(i))}</td><td class="nowrap">${chip(i)}</td>
         <td class="r nowrap">${actions(i, true)}</td></tr>`).join('')}</table><p class="muted small">${rows.length} invoice${rows.length === 1 ? '' : 's'}</p>` : '<div class="empty">No invoices match.</div>';
@@ -364,19 +410,25 @@
 
   /* ---------- PENDING ---------- */
   function viewPending() {
-    const rows = S.invoices.filter(i => ['pending', 'partial'].includes(i.status))
+    const fu = S.notes !== null, F = viewPending.f || (viewPending.f = { owner: '', due: false });
+    const all = S.invoices.filter(i => ['pending', 'partial'].includes(i.status))
       .sort((a, b) => (a.due_date || a.issue_date).localeCompare(b.due_date || b.issue_date));
-    const out = rows.reduce((a, i) => a + balance(i), 0), over = rows.filter(isOverdue);
+    const rows = all.filter(i => (!F.owner || (F.owner === '__none' ? !i.follow_up_owner : i.follow_up_owner === F.owner)) && (!F.due || followDue(i)));
+    const out = rows.reduce((a, i) => a + balance(i), 0), over = rows.filter(isOverdue), dueFu = all.filter(followDue).length;
     const nd = S.invoices.filter(i => i.status === 'draft').length;
     $('#view').innerHTML = `${nd ? `<p class="muted">You have <a href="#history" id="to-drafts">${nd} draft${nd === 1 ? '' : 's'}</a> waiting to be finalised.</p>` : ''}<div class="stats"><div class="stat"><div class="n">₹${fmt(out)}</div><div class="l">Outstanding across ${rows.length} bill${rows.length === 1 ? '' : 's'}</div></div>
-      <div class="stat"><div class="n" style="color:var(--bad)">₹${fmt(over.reduce((a, i) => a + balance(i), 0))}</div><div class="l">Overdue (${over.length} bill${over.length === 1 ? '' : 's'})</div></div></div>
-      ${rows.length ? `<table class="list"><tr><th>Invoice</th><th>Date</th><th>Client</th><th>Due</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th><th></th></tr>${rows.map(i => {
+      <div class="stat"><div class="n" style="color:var(--bad)">₹${fmt(over.reduce((a, i) => a + balance(i), 0))}</div><div class="l">Overdue (${over.length} bill${over.length === 1 ? '' : 's'})</div></div>
+      ${fu ? `<div class="stat"><div class="n" style="color:${dueFu ? 'var(--warn)' : 'inherit'}">${dueFu}</div><div class="l">Follow-ups due today or earlier</div></div>` : ''}</div>
+      ${fu ? `<div class="bar"><label style="margin:0">Chasing</label><select id="p-owner"><option value="">Everyone</option>${(S.team || []).map(t => `<option ${F.owner === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__none" ${F.owner === '__none' ? 'selected' : ''}>Nobody yet</option></select>
+        <label class="check" style="margin:0"><input type="checkbox" id="p-due" ${F.due ? 'checked' : ''}> Only follow-ups due</label></div>` : ''}
+      ${rows.length ? `<table class="list rtable"><tr><th data-title>Invoice</th><th>Date</th><th>Client</th><th>Due</th><th class="r">Amount</th><th class="r">Balance</th><th>Status</th>${fu ? '<th>Follow-up</th>' : ''}<th></th></tr>${rows.map(i => {
         const late = isOverdue(i) ? Math.round((new Date(today()) - new Date(i.due_date)) / 864e5) : 0;
         return `<tr class="click" data-act="view" data-id="${i.id}"><td class="nowrap"><b>${esc(i.number)}</b></td><td class="nowrap">${dmy(i.issue_date)}</td><td>${esc(i.client_name)}</td>
         <td class="nowrap">${i.due_date ? dmy(i.due_date) + (late ? ` <span class="small" style="color:var(--bad)">(${late}d late)</span>` : '') : '<span class="muted">—</span>'}</td>
-        <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap"><b>₹${fmt(balance(i))}</b></td><td class="nowrap">${chip(i)}</td><td class="r nowrap">${actions(i, true)}</td></tr>`;
-      }).join('')}</table>` : '<div class="empty">Nothing pending. All bills are settled.</div>'}`;
+        <td class="r nowrap">₹${fmt(i.total)}</td><td class="r nowrap"><b>₹${fmt(balance(i))}</b></td><td class="nowrap">${chip(i)}</td>${fu ? `<td class="fu-td">${followCell(i)}</td>` : ''}<td class="r nowrap">${actions(i, true)}</td></tr>`;
+      }).join('')}</table>` : `<div class="empty">${all.length ? 'No bills match this filter.' : 'Nothing pending. All bills are settled.'}</div>`}`;
     if ($('#to-drafts')) $('#to-drafts').onclick = () => { viewHistory.preset = 'draft'; };
+    if ($('#p-owner')) { $('#p-owner').onchange = e => { F.owner = e.target.value; viewPending(); }; $('#p-due').onchange = e => { F.due = e.target.checked; viewPending(); }; }
     wireActions($('#view'));
   }
 
@@ -482,8 +534,8 @@
     $('#x-csv').onclick = () => {
       const rows = range().slice().sort((a, b) => a.issue_date.localeCompare(b.issue_date) || a.seq - b.seq); if (!rows.length) return toast('No invoices in that range', true);
       const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by']
-        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by].map(q).join(','))).join('\n');
+      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by,Chasing,Next follow-up,POC,POC phone,POC email,Last note']
+        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by, i.follow_up_owner, dmy(i.next_follow_up), i.poc_name, i.poc_phone, i.poc_email, (notesOf(i)[0] || {}).note].map(q).join(','))).join('\n');
       saveBlob(new Blob(['﻿' + csv], { type: 'text/csv' }), `GFE_invoice_register_${$('#x1').value || 'start'}_to_${$('#x2').value || 'today'}.csv`);
     };
     $('#x-zip').onclick = guard(async () => {
@@ -498,6 +550,15 @@
       if (await DB.changePin($('#pin-old').value.trim(), n)) { toast('PIN changed'); $('#pin-old').value = $('#pin-new').value = ''; } else toast('Current PIN is wrong', true);
     });
   }
+
+  /* On phones, .rtable tables become stacked cards; each cell is labelled from its column header. */
+  function labelTables() {
+    $$('table.rtable').forEach(t => {
+      const rows = $$('tr', t), ths = $$('th', rows[0] || t);
+      rows.slice(1).forEach(tr => $$(':scope > td', tr).forEach((td, i) => { if (ths[i] && !ths[i].hasAttribute('data-title')) td.dataset.l = ths[i].textContent.trim(); }));
+    });
+  }
+  new MutationObserver(() => labelTables()).observe(document.getElementById('view'), { childList: true, subtree: true });
 
   /* ---------- router ---------- */
   function route() {

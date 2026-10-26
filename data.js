@@ -77,6 +77,14 @@
       const { data, error } = await sb.from('projects').select('id,name,status').order('name');
       return error ? null : data;
     },
+    // Follow-ups. These return null if the follow-up tables are not set up yet (migration-followups.sql).
+    async listTeam() { const { data } = await sb.from('allowed_users').select('display_name').order('display_name'); return (data || []).map(u => u.display_name); },
+    async listInvoiceNotes() {
+      const { data, error } = await sb.from('invoice_notes').select('*').order('noted_on', { ascending: false }).order('created_at', { ascending: false });
+      return error ? null : data;
+    },
+    async addInvoiceNote(invoiceId, note, notedOn, author) { return must(await sb.from('invoice_notes').insert({ invoice_id: invoiceId, note, noted_on: notedOn, author }).select().single()); },
+    async deleteInvoiceNote(id) { must(await sb.from('invoice_notes').delete().eq('id', id)); },
     async listPayments(invoiceId) { return must(await sb.from('payments').select('*').eq('invoice_id', invoiceId).order('paid_on')); },
     async recordPayment(inv, p, by) {
       must(await sb.from('payments').insert({ invoice_id: inv.id, amount: p.amount, paid_on: p.paid_on, mode: p.mode, note: p.note, recorded_by: by }));
