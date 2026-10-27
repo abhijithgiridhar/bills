@@ -21,6 +21,7 @@
       <a href="#list" data-tab="list">Projects</a>
       <a href="#settings" data-tab="settings">Settings</a>
     </nav>
+    <a class="btn sm" id="cal-link" href="calendar.html">Calendar</a>
     <a class="btn sm" id="back-link" href="index.html">← Back to invoices</a>
     <div class="who"><span id="who"></span></div>
   </header>
@@ -33,7 +34,7 @@
   const demo = new URLSearchParams(location.search).has('demo');
   const libs = demo ? ['data-demo.js', 'projects-data-demo.js', 'projects.js']
     : ['https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2', 'config.js', 'data.js', 'projects-data.js', 'projects.js'];
-  if (demo) document.getElementById('back-link').href = 'index.html?demo=1';
+  if (demo) { document.getElementById('back-link').href = 'index.html?demo=1'; document.getElementById('cal-link').href = 'calendar.html?demo=1'; }
   (function next(i) {
     if (i >= libs.length) return;
     const s = document.createElement('script'); s.src = libs[i];

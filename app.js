@@ -582,7 +582,7 @@
     if (!me) { $('#login').hidden = false; return; }
     if (me.denied) { $('#login').hidden = false; $('#login-msg').textContent = `${me.denied} is not authorised for this tool.`; return; }
     S.user = me; $('#who').textContent = me.name;
-    $('#demo-banner').hidden = !DB.demo; if (DB.demo) $('#proj-link').href = 'projects.html?demo=1';
+    $('#demo-banner').hidden = !DB.demo; if (DB.demo) { $('#proj-link').href = 'projects.html?demo=1'; $('#cal-link').href = 'calendar.html?demo=1'; }
     try { await refresh(); } catch (e) { $('#login').hidden = false; $('#login-msg').textContent = 'Could not load data: ' + e.message; return; }
     $('#app').hidden = false; window.addEventListener('hashchange', route); route();
   }

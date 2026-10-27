@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GFE Calendar</title>
+<link rel="icon" href="assets/logo-gfe.png">
+<meta name="theme-color" content="#55559a">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="calendar.css">
+</head>
+<body>
+<div id="boot" class="boot">Loading…</div>
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brandmark"><img src="assets/logo-gfe.png" alt=""><span>Calendar</span></div>
+    <nav id="nav"></nav>
+    <a class="btn sm" id="proj-link" href="projects.html">Project costs</a>
+    <a class="btn sm" id="back-link" href="index.html">← Back to invoices</a>
+    <div class="who"><span id="who"></span></div>
+  </header>
+  <div id="demo-banner" class="demo-banner" hidden>Demo mode: data is stored only in this browser. Nothing is sent to Supabase.</div>
+  <main id="view"></main>
+</div>
+<div id="modal-root"></div>
+<div id="toast" class="toast" hidden></div>
+<script>
+  const demo = new URLSearchParams(location.search).has('demo');
+  const libs = ['https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', 'calendar-core.js'];
+  if (demo) libs.push('data-demo.js', 'calendar-data-demo.js'); else libs.unshift('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2', 'config.js'), libs.push('data.js', 'calendar-data.js');
+  libs.push('calendar-export.js', 'calendar.js');
+  if (demo) { document.getElementById('back-link').href = 'index.html?demo=1'; document.getElementById('proj-link').href = 'projects.html?demo=1'; }
+  (function next(i) {
+    if (i >= libs.length) return;
+    const s = document.createElement('script'); s.src = libs[i];
+    s.onload = () => next(i + 1);
+    s.onerror = () => { document.getElementById('boot').textContent = 'Failed to load ' + libs[i]; };
+    document.body.appendChild(s);
+  })(0);
+</script>
+</body>
+</html>
