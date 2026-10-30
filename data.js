@@ -85,9 +85,19 @@
     },
     async addInvoiceNote(invoiceId, note, notedOn, author) { return must(await sb.from('invoice_notes').insert({ invoice_id: invoiceId, note, noted_on: notedOn, author }).select().single()); },
     async deleteInvoiceNote(id) { must(await sb.from('invoice_notes').delete().eq('id', id)); },
+    // TDS on received payments. tdsReady() is false until migration-tds-vendor.sql has been run.
+    async tdsReady() { const { error } = await sb.from('payments').select('tds_amount,tds_reviewed').limit(1); return !error; },
+    async listAllPayments() { return must(await sb.from('payments').select('*').order('paid_on')); },
+    async updatePayment(id, patch) { return must(await sb.from('payments').update(patch).eq('id', id).select().single()); },
+    async deletePayment(id) { must(await sb.from('payments').delete().eq('id', id)); },
+    async deletePaymentsFor(invoiceId) { must(await sb.from('payments').delete().eq('invoice_id', invoiceId)); },
+    // A payment record only (does NOT change the invoice's amount_paid): used to add TDS details to money already counted as received.
+    async addPaymentRecord(inv, p, by) {
+      return must(await sb.from('payments').insert({ invoice_id: inv.id, amount: p.amount, paid_on: p.paid_on, mode: p.mode, note: p.note, recorded_by: by, tds_percent: p.tds_percent || 0, tds_amount: p.tds_amount || 0, tds_reviewed: true }).select().single());
+    },
     async listPayments(invoiceId) { return must(await sb.from('payments').select('*').eq('invoice_id', invoiceId).order('paid_on')); },
     async recordPayment(inv, p, by) {
-      must(await sb.from('payments').insert({ invoice_id: inv.id, amount: p.amount, paid_on: p.paid_on, mode: p.mode, note: p.note, recorded_by: by }));
+      must(await sb.from('payments').insert({ invoice_id: inv.id, amount: p.amount, paid_on: p.paid_on, mode: p.mode, note: p.note, recorded_by: by, ...(p.tds_amount !== undefined ? { tds_percent: p.tds_percent || 0, tds_amount: p.tds_amount || 0, tds_reviewed: true } : {}) }));
       const paid = Number(inv.amount_paid) + Number(p.amount);
       return this.updateInvoice(inv.id, {
         amount_paid: paid, status: paid >= Number(inv.total) ? 'paid' : 'partial',

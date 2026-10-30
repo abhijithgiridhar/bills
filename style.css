@@ -182,3 +182,7 @@ table.list tr.click { cursor: pointer; } table.list tr.click:hover { background:
   table.rtable td.fu-td::before { margin-right: 0; margin-bottom: 2px; }
   .fu { max-width: none; width: 100%; }
 }
+
+/* ---------- TDS ---------- */
+.tdsbox { background: #f7f7fc; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 12px; } .tdsbox > label { margin-top: 0; }
+.payline { padding: 2px 0; }

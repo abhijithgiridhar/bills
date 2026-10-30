@@ -11,13 +11,15 @@
   window.PDB = {
     demo: false,
     async load() {
-      const [projects, expenses, income, settings] = await Promise.all([
+      const [projects, expenses, income, settings, inst, pays] = await Promise.all([
         sb.from('projects').select('*').order('created_at', { ascending: false }),
         sb.from('project_expenses').select('*').order('spent_on', { ascending: false }).order('created_at', { ascending: false }),
         sb.from('project_income').select('*').order('received_on', { ascending: false }),
         sb.from('project_settings').select('*').eq('id', 1).single(),
+        sb.from('project_expense_payments').select('*').order('paid_on'),     // vendor instalments (needs migration-tds-vendor.sql)
+        sb.from('payments').select('*'),                                       // invoice payments, for the TDS shown on each project
       ]);
-      return { projects: must(projects), expenses: must(expenses), income: must(income), settings: must(settings) };
+      return { projects: must(projects), expenses: must(expenses), income: must(income), settings: must(settings), instalments: inst.error ? [] : inst.data, instReady: !inst.error, payments: pays.error ? [] : pays.data };
     },
     async saveProject(p) { const r = clean({ ...p, updated_at: new Date().toISOString() }); return must(await (p.id ? sb.from('projects').update(r).eq('id', p.id) : sb.from('projects').insert(r)).select().single()); },
     async deleteProject(id) { must(await sb.from('projects').delete().eq('id', id)); },
@@ -26,6 +28,9 @@
     async markReimbursed(ids, date) { must(await sb.from('project_expenses').update({ reimbursed: true, reimbursed_on: date, updated_at: new Date().toISOString() }).in('id', ids)); },
     async saveIncome(i) { const r = clean(i); return must(await (i.id ? sb.from('project_income').update(r).eq('id', i.id) : sb.from('project_income').insert(r)).select().single()); },
     async deleteIncome(id) { must(await sb.from('project_income').delete().eq('id', id)); },
+    async saveInstalment(i) { const r = clean(i); return must(await (i.id ? sb.from('project_expense_payments').update(r).eq('id', i.id) : sb.from('project_expense_payments').insert(r)).select().single()); },
+    async deleteInstalment(id) { must(await sb.from('project_expense_payments').delete().eq('id', id)); },
+    async markInstalmentsReimbursed(ids, date) { must(await sb.from('project_expense_payments').update({ reimbursed: true, reimbursed_on: date }).in('id', ids)); },
     async saveSettings(patch) { return must(await sb.from('project_settings').update(patch).eq('id', 1).select().single()); },
     async linkInvoice(invoiceId, projectId) { must(await sb.from('invoices').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', invoiceId)); },
     // receipts live in a private bucket; they are only opened through short-lived signed links

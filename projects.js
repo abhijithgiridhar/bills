@@ -11,7 +11,7 @@
   const sum = (a, f) => a.reduce((t, x) => t + (Number(f(x)) || 0), 0);
   const cls = n => (n > 0 ? 'pos' : n < 0 ? 'neg' : 'zero');
   const STATUS = { planned: 'Planned', active: 'Active', completed: 'Completed', on_hold: 'On hold', cancelled: 'Cancelled' };
-  const P = { user: null, invoices: [], clients: [], projects: [], expenses: [], income: [], pset: null, basis: 'received' };
+  const P = { user: null, invoices: [], clients: [], projects: [], expenses: [], income: [], instalments: [], payments: [], instReady: false, pset: null, basis: 'received' };
   try { P.basis = localStorage.getItem('gfe-proj-basis') || 'received'; } catch {}
 
   /* ---------- ui helpers ---------- */
@@ -25,15 +25,18 @@
 
   /* ---------- the money maths ---------- */
   const receivedOf = i => (i.status === 'paid' ? Number(i.total) : Number(i.amount_paid || 0));
+  const paidOfExp = e => (e.instalments ? sum(P.instalments.filter(i => i.expense_id === e.id), i => i.amount) : Number(e.amount));
+  const tdsOfInv = i => sum(P.payments.filter(x => x.invoice_id === i.id), x => x.tds_amount);
   function calc(p) {
     const inv = P.invoices.filter(i => i.project_id === p.id && !['draft', 'cancelled'].includes(i.status));
-    const manual = P.income.filter(i => i.project_id === p.id), ex = P.expenses.filter(e => e.project_id === p.id);
+    const manual = P.income.filter(i => i.project_id === p.id), ex = P.expenses.filter(e => e.project_id === p.id), insts = P.instalments.filter(i => i.project_id === p.id);
     const manualTot = sum(manual, i => i.amount);
-    const billed = sum(inv, i => i.total) + manualTot, received = sum(inv, receivedOf) + manualTot, cost = sum(ex, e => e.amount);
+    const billed = sum(inv, i => i.total) + manualTot, received = sum(inv, receivedOf) + manualTot, cost = sum(ex, e => e.amount), paidOut = sum(ex, paidOfExp), tds = sum(inv, tdsOfInv);
     const byCat = {}; ex.forEach(e => (byCat[e.category] = (byCat[e.category] || 0) + Number(e.amount)));
-    const owed = {}; ex.filter(e => e.kind === 'spend' && e.paid_by && e.paid_by !== 'Company' && !e.reimbursed).forEach(e => (owed[e.paid_by] = (owed[e.paid_by] || 0) + Number(e.amount)));
+    const owed = {}; ex.filter(e => e.kind === 'spend' && !e.instalments && e.paid_by && e.paid_by !== 'Company' && !e.reimbursed).forEach(e => (owed[e.paid_by] = (owed[e.paid_by] || 0) + Number(e.amount)));
+    insts.filter(i => i.paid_by && i.paid_by !== 'Company' && !i.reimbursed).forEach(i => (owed[i.paid_by] = (owed[i.paid_by] || 0) + Number(i.amount)));
     const pr = received - cost, pb = billed - cost;
-    return { inv, manual, ex, billed, received, outstanding: billed - received, cost, byCat, owed, labour: sum(ex.filter(e => e.kind === 'labour'), e => e.amount),
+    return { inv, manual, ex, insts, billed, received, tds, outstanding: billed - received, cost, paidOut, toPay: cost - paidOut, byCat, owed, labour: sum(ex.filter(e => e.kind === 'labour'), e => e.amount),
       profitReceived: pr, marginReceived: received > 0 ? (pr / received) * 100 : null, profitBilled: pb, marginBilled: billed > 0 ? (pb / billed) * 100 : null };
   }
   const pick = c => (P.basis === 'received' ? { income: c.received, profit: c.profitReceived, margin: c.marginReceived } : { income: c.billed, profit: c.profitBilled, margin: c.marginBilled });
@@ -44,7 +47,7 @@
 
   /* ---------- data refresh ---------- */
   async function reload() {
-    const d = await PDB.load(); Object.assign(P, { projects: d.projects, expenses: d.expenses, income: d.income, pset: d.settings });
+    const d = await PDB.load(); Object.assign(P, { projects: d.projects, expenses: d.expenses, income: d.income, pset: d.settings, instalments: d.instalments, instReady: d.instReady, payments: d.payments });
     [P.invoices, P.clients] = await Promise.all([DB.listInvoices(), DB.listClients()]);
   }
   const redraw = async () => { await reload(); route(); };
@@ -80,30 +83,31 @@
     $('#view').innerHTML = `<div class="crumbs"><a href="#list">← All projects</a></div>
       <div class="bar"><h2 style="margin:0" class="grow">${esc(p.name)} ${chip(p.status)}</h2>${basisSwitch()}<button class="btn" id="edit">Edit project</button><button class="btn" id="csv">Export CSV</button></div>
       <p class="muted small" style="margin-top:-6px">${esc(p.client_name || 'No client')}${p.start_date ? ' · ' + dmy(p.start_date) + (p.end_date ? ' → ' + dmy(p.end_date) : '') : ''}${p.contract_value > 0 ? ' · Contract value ' + rs(p.contract_value) : ''}${p.notes ? ' · ' + esc(p.notes) : ''}</p>
-      <div class="kpis"><div class="kpi"><div class="l">Income (${basisName()})</div><div class="n">${rs(k.income)}</div><div class="s">Billed ${rs(c.billed)} · Received ${rs(c.received)}</div></div>
-        <div class="kpi"><div class="l">Total costs</div><div class="n">${rs(c.cost)}</div><div class="s">incl. team time ${rs(c.labour)}</div></div>
+      <div class="kpis"><div class="kpi"><div class="l">Income (${basisName()})</div><div class="n">${rs(k.income)}</div><div class="s">Billed ${rs(c.billed)} · Received ${rs(c.received)}${c.tds > 0 ? ` (incl. ${rs(c.tds)} TDS)` : ''}</div></div>
+        <div class="kpi"><div class="l">Total costs</div><div class="n">${rs(c.cost)}</div><div class="s">incl. team time ${rs(c.labour)}${c.toPay > 0.5 ? ` · <b>${rs(c.toPay)} still to pay</b>` : ''}</div></div>
         <div class="kpi big"><div class="l">Profit / loss</div><div class="n ${cls(k.profit)}">${rs(k.profit)}</div><div class="s ${cls(k.profit)}">on ${basisName()} income</div></div>
         <div class="kpi big"><div class="l">Margin</div><div class="n ${cls(k.profit)}">${pct(k.margin)}</div><div class="s">profit ÷ income</div></div></div>
       <div class="card"><table class="compare rtable"><tr><th data-title></th><th>Income</th><th>Costs</th><th>Profit / loss</th><th>Margin</th></tr>
         <tr><td><b>If you count what's received</b></td><td>${rs(c.received)}</td><td>${rs(c.cost)}</td><td class="${cls(c.profitReceived)}"><b>${rs(c.profitReceived)}</b></td><td class="${cls(c.profitReceived)}">${pct(c.marginReceived)}</td></tr>
         <tr><td><b>If you count what's billed</b></td><td>${rs(c.billed)}</td><td>${rs(c.cost)}</td><td class="${cls(c.profitBilled)}"><b>${rs(c.profitBilled)}</b></td><td class="${cls(c.profitBilled)}">${pct(c.marginBilled)}</td></tr>
         ${p.contract_value > 0 ? `<tr><td><b>At full contract value</b></td><td>${rs(p.contract_value)}</td><td>${rs(c.cost)}</td><td class="${cls(p.contract_value - c.cost)}"><b>${rs(p.contract_value - c.cost)}</b></td><td class="${cls(p.contract_value - c.cost)}">${pct(((p.contract_value - c.cost) / p.contract_value) * 100)}</td></tr>` : ''}</table>
-        <p class="muted small" style="margin:8px 0 0">Still to collect from invoices: <b>${rs(c.outstanding)}</b>. Margin = profit ÷ income.</p></div>
+        <p class="muted small" style="margin:8px 0 0">Still to collect from invoices: <b>${rs(c.outstanding)}</b>. Margin = profit ÷ income.</p>${c.tds > 0 ? `<p class="small" style="margin:6px 0 0">Of the ${rs(c.received)} received, <b>${rs(c.tds)}</b> was withheld by clients as TDS. It is counted as income, and you can claim it back (see the <a href="index.html${DB.demo ? '?demo=1' : ''}#tds">TDS tab</a>). Cash that reached the bank: <b>${rs(c.received - c.tds)}</b>.</p>` : ''}</div>
       ${p.budget > 0 || cats.some(x => (p.category_budgets || {})[x]) ? `<div class="card"><h3>Budget vs spent</h3>
         ${p.budget > 0 ? `<div class="catrow"><b>Total budget</b>${meter(c.cost, p.budget)}<span class="${c.cost > p.budget ? 'neg' : ''}">${rs(c.cost)} of ${rs(p.budget)}${c.cost > p.budget ? ' — over by ' + rs(c.cost - p.budget) : ' — ' + rs(p.budget - c.cost) + ' left'}</span></div>` : ''}
         ${cats.map(x => { const b = Number((p.category_budgets || {})[x]) || 0, s = c.byCat[x] || 0; return `<div class="catrow"><span>${esc(x)}</span>${b > 0 ? meter(s, b) : '<span class="muted small">no budget set</span>'}<span class="${b > 0 && s > b ? 'neg' : ''}">${rs(s)}${b > 0 ? ' of ' + rs(b) : ''}</span></div>`; }).join('')}</div>` : ''}
       <div class="sect"><h3>Money in</h3><span class="grow"></span><button class="btn sm" id="link">Link invoices</button><button class="btn sm" id="add-inc">+ Other income</button></div>
       <div class="card" style="padding:0">${c.inv.length || c.manual.length ? `<table class="list rtable" style="border:0"><tr><th data-title>Source</th><th>Date</th><th class="r">Billed</th><th class="r">Received</th><th>Status</th><th></th></tr>
-        ${c.inv.map(i => `<tr><td><b>Invoice ${esc(i.number)}</b><div class="small muted">${esc(i.client_name)}</div></td><td class="nowrap">${dmy(i.issue_date)}</td><td class="r nowrap">${rs(i.total)}</td><td class="r nowrap">${rs(receivedOf(i))}</td><td><span class="chip ${i.status}">${i.status === 'partial' ? 'Part-paid' : i.status[0].toUpperCase() + i.status.slice(1)}</span></td><td class="r"><button class="btn sm" data-unlink="${i.id}">Unlink</button></td></tr>`).join('')}
+        ${c.inv.map(i => `<tr><td><b>Invoice ${esc(i.number)}</b><div class="small muted">${esc(i.client_name)}</div></td><td class="nowrap">${dmy(i.issue_date)}</td><td class="r nowrap">${rs(i.total)}</td><td class="r nowrap">${rs(receivedOf(i))}</td><td><span class="chip ${i.status}">${i.status === 'partial' ? 'Part-paid' : i.status[0].toUpperCase() + i.status.slice(1)}</span>${tdsOfInv(i) > 0 ? `<span class="tag">TDS ${rs(tdsOfInv(i))}</span>` : ''}</td><td class="r"><button class="btn sm" data-unlink="${i.id}">Unlink</button></td></tr>`).join('')}
         ${c.manual.map(i => `<tr><td><b>${esc(i.source || 'Other income')}</b><div class="small muted">${esc([i.mode, i.notes].filter(Boolean).join(' · '))}</div></td><td class="nowrap">${dmy(i.received_on)}</td><td class="r nowrap">${rs(i.amount)}</td><td class="r nowrap">${rs(i.amount)}</td><td><span class="tag">Manual</span></td><td class="r nowrap"><button class="btn sm" data-edit-inc="${i.id}">Edit</button> <button class="btn sm danger" data-del-inc="${i.id}">Delete</button></td></tr>`).join('')}</table>` : '<div class="empty" style="padding:22px">No income yet. Link an invoice you have raised, or add other income.</div>'}</div>
       <div class="sect"><h3>Spends &amp; team time</h3><span class="grow"></span><button class="btn sm primary" id="add-exp">+ Add spend</button><button class="btn sm" id="add-time">+ Log team time</button></div>
       ${cats.length > 1 ? `<div class="filters"><button data-cat="" class="${!cf ? 'on' : ''}">All</button>${[...new Set(c.ex.map(e => e.category))].map(x => `<button data-cat="${esc(x)}" class="${cf === x ? 'on' : ''}">${esc(x)}</button>`).join('')}</div>` : ''}
       <div class="card" style="padding:0">${exRows.length ? `<table class="list rtable" style="border:0"><tr><th>Date</th><th data-title>What</th><th>Category</th><th>Paid by</th><th class="r">Amount</th><th></th></tr>
-        ${exRows.map(e => `<tr><td class="nowrap">${dmy(e.spent_on)}</td><td><b>${esc(e.kind === 'labour' ? e.person : e.vendor || e.description || '—')}</b>${e.kind === 'labour' ? '<span class="tag time">Time</span>' : ''}
-          <div class="small muted">${esc(e.kind === 'labour' ? `${fmt(e.units)} ${e.unit_label}${e.units == 1 ? '' : 's'} × ${rs(e.rate)}${e.description ? ' · ' + e.description : ''}` : [e.vendor && e.description ? e.description : '', e.notes].filter(Boolean).join(' · '))}</div></td>
-          <td>${esc(e.category)}</td><td class="nowrap">${e.kind === 'labour' ? '<span class="muted">—</span>' : esc(e.paid_by) + (e.paid_by !== 'Company' ? (e.reimbursed ? '<span class="tag ok">Repaid</span>' : '<span class="tag owed">Owed</span>') : '')}</td>
-          <td class="r nowrap"><b>${rs(e.amount)}</b></td><td class="r nowrap">${e.receipt_path ? `<button class="btn sm" data-receipt="${e.id}">Receipt</button> ` : ''}<button class="btn sm" data-edit-exp="${e.id}">Edit</button> <button class="btn sm danger" data-del-exp="${e.id}">Delete</button></td></tr>`).join('')}
-        <tr><td colspan="4" class="r"><b>${cf ? esc(cf) + ' total' : 'Total'}</b></td><td class="r"><b>${rs(sum(exRows, e => e.amount))}</b></td><td></td></tr></table>` : '<div class="empty" style="padding:22px">No spends yet. Add the first one with <b>+ Add spend</b>.</div>'}</div>
+        ${exRows.map(e => { const paid = paidOfExp(e), bal = Number(e.amount) - paid, inst = !!e.instalments, late = inst && bal > 0.005 && e.pay_by && e.pay_by < today();
+          return `<tr><td class="nowrap">${dmy(e.spent_on)}</td><td><b>${esc(e.kind === 'labour' ? e.person : e.vendor || e.description || '—')}</b>${e.kind === 'labour' ? '<span class="tag time">Time</span>' : ''}${inst ? `<span class="tag ${bal <= 0.005 ? 'ok' : paid > 0 ? '' : 'owed'}">${bal <= 0.005 ? 'Paid in full' : paid > 0 ? 'Part-paid' : 'Unpaid'}</span>` : ''}
+          <div class="small muted">${esc(e.kind === 'labour' ? `${fmt(e.units)} ${e.unit_label}${e.units == 1 ? '' : 's'} × ${rs(e.rate)}${e.description ? ' · ' + e.description : ''}` : [e.vendor && e.description ? e.description : '', e.notes].filter(Boolean).join(' · '))}${inst && bal > 0.005 && e.pay_by ? `<span style="${late ? 'color:var(--bad);font-weight:600' : ''}"> · balance due by ${dmy(e.pay_by)}${late ? ' (overdue)' : ''}</span>` : ''}</div></td>
+          <td>${esc(e.category)}</td><td class="nowrap">${e.kind === 'labour' ? '<span class="muted">—</span>' : inst ? '<span class="muted small">Instalments</span>' : esc(e.paid_by) + (e.paid_by !== 'Company' ? (e.reimbursed ? '<span class="tag ok">Repaid</span>' : '<span class="tag owed">Owed</span>') : '')}</td>
+          <td class="r nowrap"><b>${rs(e.amount)}</b>${inst ? `<div class="small muted">Paid ${rs(paid)} · To pay ${rs(bal)}</div>` : ''}</td><td class="r nowrap">${inst ? `<button class="btn sm ${bal > 0.005 ? 'primary' : ''}" data-inst="${e.id}">${bal > 0.005 ? 'Pay' : 'Payments'}</button> ` : ''}${e.receipt_path ? `<button class="btn sm" data-receipt="${e.id}">Receipt</button> ` : ''}<button class="btn sm" data-edit-exp="${e.id}">Edit</button> <button class="btn sm danger" data-del-exp="${e.id}">Delete</button></td></tr>`; }).join('')}
+        <tr><td colspan="4" class="r"><b>${cf ? esc(cf) + ' total' : 'Total'}</b>${!cf && c.toPay > 0.5 ? `<div class="small muted">Paid so far ${rs(c.paidOut)} · Still to pay ${rs(c.toPay)}</div>` : ''}</td><td class="r"><b>${rs(sum(exRows, e => e.amount))}</b></td><td></td></tr></table>` : '<div class="empty" style="padding:22px">No spends yet. Add the first one with <b>+ Add spend</b>.</div>'}</div>
       ${owedTotal > 0 ? `<div class="sect"><h3>Money owed back to the team</h3></div><div class="card">${Object.entries(c.owed).map(([who, amt]) => `<div class="pill-row" style="margin:4px 0"><b style="min-width:110px">${esc(who)}</b><span>${rs(amt)} paid out of pocket</span><button class="btn sm" data-repay="${esc(who)}">Mark as repaid</button></div>`).join('')}</div>` : ''}
       `;
     wireBasis(() => viewProject(id));
@@ -120,6 +124,7 @@
       else if (t.dataset.delExp) { const x = P.expenses.find(z => z.id === t.dataset.delExp); if (confirm('Delete this entry' + (x.receipt_path ? ' and its receipt' : '') + '?')) { if (x.receipt_path) await PDB.removeReceipt(x.receipt_path); await PDB.deleteExpense(x.id); toast('Deleted'); await redraw(); } }
       else if (t.dataset.receipt) { const x = P.expenses.find(z => z.id === t.dataset.receipt); window.open(await PDB.receiptUrl(x.receipt_path), '_blank', 'noopener'); }
       else if (t.dataset.repay) repayModal(p, t.dataset.repay, c);
+      else if (t.dataset.inst) instalmentsModal(p, P.expenses.find(z => z.id === t.dataset.inst));
     });
   }
 
@@ -150,25 +155,35 @@
   function expenseModal(p, e) {
     const isNew = !e, cats = P.pset.categories, payers = P.pset.payers;
     const m = modal(`<h3>${isNew ? 'Add a spend' : 'Edit spend'} — ${esc(p.name)}</h3>
-      <div class="row c2"><div><label>Date</label><input id="e-date" type="date" value="${e?.spent_on || today()}"></div><div><label>Amount ₹</label><input id="e-amt" type="number" min="0" step="0.01" value="${e?.amount ?? ''}" autofocus></div></div>
+      <div class="row c2"><div><label>Date</label><input id="e-date" type="date" value="${e?.spent_on || today()}"></div><div><label id="e-amt-l">${e?.instalments ? 'Agreed total ₹' : 'Amount ₹'}</label><input id="e-amt" type="number" min="0" step="0.01" value="${e?.amount ?? ''}" autofocus></div></div>
+      ${isNew ? `<label class="check"><input type="checkbox" id="e-inst" ${P.instReady ? '' : 'disabled'}> Pay this vendor / freelancer in instalments (part payments)</label>${P.instReady ? '' : '<p class="small muted" style="margin:-4px 0 6px">Part payments need a one-time database update: run supabase/migration-tds-vendor.sql.</p>'}
+        <div id="e-ibox" hidden><div class="row c2"><div><label>First payment made now ₹ (optional)</label><input id="e-first" type="number" min="0" step="0.01"></div><div><label>Balance due by (optional)</label><input id="e-payby" type="date"></div></div><p class="small muted" style="margin:0 0 6px">The amount above is the full agreed total. You can record further payments later with the <b>Pay</b> button.</p></div>` : (e.instalments ? `<div class="row c2"><div><label>Balance due by (optional)</label><input id="e-payby" type="date" value="${e.pay_by || ''}"></div><div></div></div><p class="small muted" style="margin:0 0 6px">This spend is paid in instalments. Use the <b>Pay</b> / <b>Payments</b> button on its row to record or change payments.</p>` : '')}
       <div class="row c2"><div><label>Category</label><select id="e-cat">${[...new Set([...cats, ...(e?.category && e.kind === 'spend' && !cats.includes(e.category) ? [e.category] : [])])].map(x => `<option ${x === (e?.category || cats[0]) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div>
-        <div><label>Paid by</label><select id="e-by">${payers.map(x => `<option ${x === (e?.paid_by || 'Company') ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div></div>
+        <div id="e-byrow" ${e?.instalments ? 'hidden' : ''}><label id="e-by-l">Paid by</label><select id="e-by">${payers.map(x => `<option ${x === (e?.paid_by || 'Company') ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div></div>
       <label>Vendor / who you paid</label><input id="e-vendor" value="${esc(e?.vendor || '')}"><label>What it was for</label><input id="e-desc" value="${esc(e?.description || '')}">
       <label class="check" id="e-rb-row" ${!e || e.paid_by === 'Company' ? 'hidden' : ''}><input type="checkbox" id="e-rb" ${e?.reimbursed ? 'checked' : ''}> Already repaid to them</label>
       <label>Receipt / bill (photo or PDF, up to 10 MB)</label>${e?.receipt_path ? '<div class="small" id="e-cur">A receipt is attached. <label class="check" style="display:inline-flex;margin:0 0 0 8px"><input type="checkbox" id="e-rm"> remove it</label></div>' : ''}<input id="e-file" type="file" accept="image/*,application/pdf">
       <label>Notes</label><input id="e-notes" value="${esc(e?.notes || '')}">
       <div class="foot"><button class="btn" id="m-x">Cancel</button><button class="btn primary" id="m-ok">${isNew ? 'Add spend' : 'Save'}</button></div>`);
-    $('#e-by', m).onchange = () => { $('#e-rb-row', m).hidden = $('#e-by', m).value === 'Company'; };
+    const syncRb = () => { $('#e-rb-row', m).hidden = $('#e-by', m).value === 'Company' || (e?.instalments); };
+    $('#e-by', m).onchange = syncRb;
+    if ($('#e-inst', m)) $('#e-inst', m).onchange = () => { const on = $('#e-inst', m).checked; $('#e-ibox', m).hidden = !on; $('#e-amt-l', m).textContent = on ? 'Agreed total ₹' : 'Amount ₹'; $('#e-by-l', m).textContent = on ? 'First payment paid by' : 'Paid by'; };
     $('#m-x', m).onclick = closeModal;
     $('#m-ok', m).onclick = guard(async () => {
       const amount = Number($('#e-amt', m).value); if (!(amount >= 0) || $('#e-amt', m).value === '') return toast('Enter the amount', true);
+      const useInst = isNew ? !!$('#e-inst', m)?.checked : !!e.instalments, first = useInst && isNew ? Number($('#e-first', m).value) || 0 : 0;
+      if (first > amount) return toast('The first payment cannot be more than the agreed total', true);
+      if (e?.instalments && amount < paidOfExp(e) - 0.005) return toast(`₹${fmt(paidOfExp(e))} has already been paid, so the agreed total cannot be lower`, true);
       const by = $('#e-by', m).value; let path = e?.receipt_path || null; const file = $('#e-file', m).files[0];
       $('#m-ok', m).disabled = true;
       try {
         if (path && ($('#e-rm', m)?.checked || file)) { await PDB.removeReceipt(path); path = null; }
         if (file) path = await PDB.uploadReceipt(p.id, file);
-        await PDB.saveExpense({ ...(e || {}), project_id: p.id, kind: 'spend', spent_on: $('#e-date', m).value || today(), category: $('#e-cat', m).value, vendor: $('#e-vendor', m).value, description: $('#e-desc', m).value, amount,
-          paid_by: by, reimbursed: by === 'Company' ? false : $('#e-rb', m).checked, reimbursed_on: by !== 'Company' && $('#e-rb', m).checked ? (e?.reimbursed_on || today()) : null, receipt_path: path, notes: $('#e-notes', m).value, created_by: e?.created_by || P.user.name });
+        const rb = by !== 'Company' && $('#e-rb', m).checked;
+        const saved = await PDB.saveExpense({ ...(e || {}), project_id: p.id, kind: 'spend', spent_on: $('#e-date', m).value || today(), category: $('#e-cat', m).value, vendor: $('#e-vendor', m).value, description: $('#e-desc', m).value, amount,
+          ...(useInst ? { instalments: true, pay_by: $('#e-payby', m).value || null, paid_by: 'Company', reimbursed: false, reimbursed_on: null } : { paid_by: by, reimbursed: rb, reimbursed_on: rb ? (e?.reimbursed_on || today()) : null }),
+          receipt_path: path, notes: $('#e-notes', m).value, created_by: e?.created_by || P.user.name });
+        if (isNew && useInst && first > 0) await PDB.saveInstalment({ expense_id: saved.id, project_id: p.id, paid_on: $('#e-date', m).value || today(), amount: first, mode: 'Bank transfer', paid_by: by, reimbursed: rb, reimbursed_on: rb ? today() : null, created_by: P.user.name });
       } catch (err) { $('#m-ok', m).disabled = false; throw err; }
       closeModal(); toast(isNew ? 'Spend added' : 'Saved'); await redraw();
     });
@@ -229,20 +244,50 @@
     $('#m-ok', m).onclick = guard(async () => { if (!sel.size) return toast('Tick at least one invoice', true); for (const id of sel) await PDB.linkInvoice(id, p.id); closeModal(); toast(`${sel.size} invoice${sel.size === 1 ? '' : 's'} linked`); await redraw(); });
   }
 
+  function instalmentsModal(p, e) {
+    const m = modal('', ''), payers = P.pset.payers;
+    const render = () => {
+      const ins = P.instalments.filter(i => i.expense_id === e.id).sort((a, b) => a.paid_on.localeCompare(b.paid_on)), paid = sum(ins, i => i.amount), bal = Number(e.amount) - paid;
+      m.innerHTML = `<h3>Payments to ${esc(e.vendor || e.description || 'vendor')} — ${esc(p.name)}</h3>
+        <p>Agreed <b>${rs(e.amount)}</b> · Paid <b>${rs(paid)}</b> · Still to pay <b class="${bal > 0.005 ? 'neg' : 'pos'}">${rs(Math.max(0, bal))}</b>${e.pay_by && bal > 0.005 ? ` · due by ${dmy(e.pay_by)}` : ''}</p>${meter(paid, Number(e.amount))}
+        ${ins.length ? `<table class="list" style="margin-top:12px"><tr><th>Date</th><th class="r">Amount</th><th>Mode</th><th>Paid by</th><th></th></tr>${ins.map(i => `<tr><td class="nowrap">${dmy(i.paid_on)}</td><td class="r nowrap"><b>${rs(i.amount)}</b></td><td>${esc(i.mode || '')}${i.note ? `<div class="small muted">${esc(i.note)}</div>` : ''}</td><td class="nowrap">${esc(i.paid_by)}${i.paid_by !== 'Company' ? (i.reimbursed ? '<span class="tag ok">Repaid</span>' : '<span class="tag owed">Owed</span>') : ''}</td><td class="r"><button class="btn sm danger" data-del="${i.id}">Delete</button></td></tr>`).join('')}</table>` : '<p class="muted small" style="margin-top:12px">No payments recorded yet.</p>'}
+        ${bal > 0.005 ? `<div class="card" style="margin:14px 0 0;background:#fafafd"><b>Record a payment</b>
+          <div class="row c2"><div><label>Date paid</label><input id="i-date" type="date" value="${today()}"></div><div><label>Amount ₹ (balance is ${rs(bal)})</label><input id="i-amt" type="number" min="0" step="0.01" value="${bal}"></div></div>
+          <div class="row c2"><div><label>Mode</label><select id="i-mode"><option>Bank transfer</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></div><div><label>Paid by</label><select id="i-by">${payers.map(x => `<option>${esc(x)}</option>`).join('')}</select></div></div>
+          <label class="check" id="i-rb-row" hidden><input type="checkbox" id="i-rb"> Already repaid to them</label><label>Note (optional)</label><input id="i-note" placeholder="UTR / reference"><p style="margin:10px 0 0"><button class="btn primary" id="i-save">Record payment</button></p></div>` : '<p style="margin-top:12px"><span class="tag ok">Fully paid</span></p>'}
+        <div class="foot"><button class="btn" id="m-x">Close</button></div>`;
+      $('#m-x', m).onclick = () => { closeModal(); route(); };
+      if ($('#i-by', m)) $('#i-by', m).onchange = () => { $('#i-rb-row', m).hidden = $('#i-by', m).value === 'Company'; };
+      if ($('#i-save', m)) $('#i-save', m).onclick = guard(async () => {
+        const amount = Number($('#i-amt', m).value); if (!(amount > 0)) return toast('Enter the amount paid', true);
+        if (amount > bal + 0.005) return toast(`That is more than the balance of ${rs(bal)}. Raise the agreed total first if the price went up.`, true);
+        const by = $('#i-by', m).value, rb = by !== 'Company' && $('#i-rb', m).checked;
+        await PDB.saveInstalment({ expense_id: e.id, project_id: p.id, paid_on: $('#i-date', m).value || today(), amount, mode: $('#i-mode', m).value, note: $('#i-note', m).value, paid_by: by, reimbursed: rb, reimbursed_on: rb ? today() : null, created_by: P.user.name });
+        await reload(); toast('Payment recorded'); render();
+      });
+      $$('[data-del]', m).forEach(b => (b.onclick = guard(async () => { if (!confirm('Delete this payment?')) return; await PDB.deleteInstalment(b.dataset.del); await reload(); toast('Deleted'); render(); })));
+    };
+    render();
+  }
+
   function repayModal(p, who, c) {
-    const items = c.ex.filter(e => e.kind === 'spend' && e.paid_by === who && !e.reimbursed), total = sum(items, e => e.amount);
-    const m = modal(`<h3>Repay ${esc(who)}?</h3><p>${items.length} spend${items.length === 1 ? '' : 's'} on <b>${esc(p.name)}</b>, ${rs(total)} in total, will be marked as repaid.</p>
+    const items = c.ex.filter(e => e.kind === 'spend' && !e.instalments && e.paid_by === who && !e.reimbursed), insts = c.insts.filter(i => i.paid_by === who && !i.reimbursed), total = sum(items, e => e.amount) + sum(insts, i => i.amount), n = items.length + insts.length;
+    const m = modal(`<h3>Repay ${esc(who)}?</h3><p>${n} payment${n === 1 ? '' : 's'} on <b>${esc(p.name)}</b>, ${rs(total)} in total, will be marked as repaid.</p>
       <label>Date repaid</label><input id="r-date" type="date" value="${today()}"><div class="foot"><button class="btn" id="m-x">Cancel</button><button class="btn primary" id="m-ok">Mark as repaid</button></div>`);
     $('#m-x', m).onclick = closeModal;
-    $('#m-ok', m).onclick = guard(async () => { await PDB.markReimbursed(items.map(e => e.id), $('#r-date', m).value || today()); closeModal(); toast('Marked as repaid'); await redraw(); });
+    $('#m-ok', m).onclick = guard(async () => { const d = $('#r-date', m).value || today(); if (items.length) await PDB.markReimbursed(items.map(e => e.id), d); if (insts.length) await PDB.markInstalmentsReimbursed(insts.map(i => i.id), d); closeModal(); toast('Marked as repaid'); await redraw(); });
   }
 
   function exportCsv(p, c) {
-    const rows = [['Type', 'Date', 'Description', 'Category / status', 'Paid by', 'Money in (₹)', 'Money out (₹)']];
-    c.inv.forEach(i => rows.push(['Invoice', i.issue_date, `${i.number} ${i.client_name}`, i.status, '', i.total, '']));
-    c.manual.forEach(i => rows.push(['Other income', i.received_on, i.source || '', i.mode || '', '', i.amount, '']));
-    c.ex.forEach(e => rows.push([e.kind === 'labour' ? 'Team time' : 'Spend', e.spent_on, e.kind === 'labour' ? `${e.person}: ${e.units} ${e.unit_label} x ${e.rate}` : [e.vendor, e.description].filter(Boolean).join(' - '), e.category, e.kind === 'labour' ? '' : e.paid_by + (e.paid_by !== 'Company' ? (e.reimbursed ? ' (repaid)' : ' (owed)') : ''), '', e.amount]));
-    rows.push([], ['Billed', '', '', '', '', c.billed, ''], ['Received', '', '', '', '', c.received, ''], ['Costs', '', '', '', '', '', c.cost], ['Profit on received', '', '', '', '', c.profitReceived, ''], ['Margin on received %', '', '', '', '', c.marginReceived === null ? '' : c.marginReceived.toFixed(1), ''], ['Profit on billed', '', '', '', '', c.profitBilled, ''], ['Margin on billed %', '', '', '', '', c.marginBilled === null ? '' : c.marginBilled.toFixed(1), '']);
+    const rows = [['Type', 'Date', 'Description', 'Category / status', 'Paid by', 'Money in (₹)', 'Cost (₹)', 'Paid so far (₹)']];
+    c.inv.forEach(i => rows.push(['Invoice', i.issue_date, `${i.number} ${i.client_name}`, i.status + (tdsOfInv(i) > 0 ? ` (TDS withheld ${tdsOfInv(i)})` : ''), '', i.total, '', '']));
+    c.manual.forEach(i => rows.push(['Other income', i.received_on, i.source || '', i.mode || '', '', i.amount, '', '']));
+    c.ex.forEach(e => {
+      const who = e.kind === 'labour' ? '' : e.instalments ? 'Instalments' : e.paid_by + (e.paid_by !== 'Company' ? (e.reimbursed ? ' (repaid)' : ' (owed)') : '');
+      rows.push([e.kind === 'labour' ? 'Team time' : e.instalments ? 'Spend (agreed total)' : 'Spend', e.spent_on, e.kind === 'labour' ? `${e.person}: ${e.units} ${e.unit_label} x ${e.rate}` : [e.vendor, e.description].filter(Boolean).join(' - '), e.category, who, '', e.amount, e.instalments ? '' : e.amount]);
+      if (e.instalments) c.insts.filter(i => i.expense_id === e.id).forEach(i => rows.push(['  Instalment paid', i.paid_on, [e.vendor, i.note].filter(Boolean).join(' - '), i.mode || '', i.paid_by + (i.paid_by !== 'Company' ? (i.reimbursed ? ' (repaid)' : ' (owed)') : ''), '', '', i.amount]));
+    });
+    rows.push([], ['Billed', '', '', '', '', c.billed, '', ''], ['Received (incl. TDS)', '', '', '', '', c.received, '', ''], ['  of which TDS withheld', '', '', '', '', c.tds, '', ''], ['Costs (agreed)', '', '', '', '', '', c.cost, c.paidOut], ['  still to pay vendors', '', '', '', '', '', c.toPay, ''], ['Profit on received', '', '', '', '', c.profitReceived, '', ''], ['Margin on received %', '', '', '', '', c.marginReceived === null ? '' : c.marginReceived.toFixed(1), '', ''], ['Profit on billed', '', '', '', '', c.profitBilled, '', ''], ['Margin on billed %', '', '', '', '', c.marginBilled === null ? '' : c.marginBilled.toFixed(1), '', '']);
     download(rows.map(csvRow).join('\n'), `Project ${p.name.replace(/[^\w]+/g, '_')}.csv`);
   }
 

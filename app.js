@@ -124,25 +124,47 @@
     [S.settings, S.brands, S.clients, S.invoices] = await Promise.all([DB.getSettings(), DB.listBrands(), DB.listClients(), DB.listInvoices()]);
     try { S.projects = await DB.listProjectsLite(); } catch { S.projects = null; } // null = project tables not set up yet
     try { S.notes = await DB.listInvoiceNotes(); S.team = await DB.listTeam(); } catch { S.notes = null; } // null = follow-up tables not set up yet
+    try { S.tdsReady = await DB.tdsReady(); S.payments = S.tdsReady ? await DB.listAllPayments() : []; } catch { S.tdsReady = false; S.payments = []; } // false = TDS columns not set up yet
     const n = S.invoices.filter(i => ['pending', 'partial'].includes(i.status)).length;
     $('#pending-count').textContent = n || '';
   };
 
   /* ---------- invoice actions (shared by history / pending / view) ---------- */
   const afterChange = async () => { await refresh(); route(); };
+  /* ---------- TDS fields (shared by the payment pop-up and the TDS review) ---------- */
+  function tdsBlock(pct, tds) {
+    return `<div class="tdsbox"><label>TDS the client cut (leave empty if none)</label>
+      <div class="row c2"><div><label>TDS %</label><input id="t-pct" type="number" min="0" max="100" step="0.01" value="${pct || ''}"></div><div><label>TDS amount ₹</label><input id="t-amt" type="number" min="0" step="0.01" value="${tds || ''}"></div></div>
+      <div class="bar" id="t-chips" style="margin:6px 0">${[2, 5, 10, 20].map(p => `<button type="button" class="btn sm" data-p="${p}">${p}%</button>`).join('')}<button type="button" class="btn sm" data-p="0">No TDS</button></div>
+      <p class="small" id="t-sum" style="margin:0"></p></div>`;
+  }
+  function wireTds(m, getGross) {
+    const pct = $('#t-pct', m), amt = $('#t-amt', m), sum = $('#t-sum', m);
+    const upd = () => { const g = getGross(), t = Number(amt.value) || 0; sum.innerHTML = `Cash received in bank: <b>₹${fmt(Math.max(0, g - t))}</b>${t > 0 ? ` · TDS to claim back: <b>₹${fmt(t)}</b>` : ''}`; };
+    pct.oninput = () => { const g = getGross(); amt.value = pct.value === '' ? '' : String(Math.round(g * Number(pct.value) / 100)); upd(); };      // TDS is normally whole rupees
+    amt.oninput = () => { const g = getGross(); pct.value = amt.value === '' || !g ? '' : String(Math.round(Number(amt.value) / g * 10000) / 100); upd(); };
+    $('#t-chips', m).onclick = e => { const p = e.target.dataset.p; if (p === undefined) return; if (p === '0') { pct.value = ''; amt.value = ''; upd(); } else { pct.value = p; pct.oninput(); } };
+    return { read: () => ({ tds_percent: Number(pct.value) || 0, tds_amount: Number(amt.value) || 0 }), refresh: () => (pct.value !== '' ? pct.oninput() : upd()), upd };
+  }
   function paymentModal(inv) {
+    const tdsOn = !!S.tdsReady;
     const m = modal(`<h3>Record payment — ${esc(inv.number)}</h3>
       <p class="muted">${esc(inv.client_name)} · Total ₹${fmt(inv.total)} · Balance ₹${fmt(balance(inv))}</p>
-      <label>Amount received (₹)</label><input id="p-amt" type="number" min="0" step="0.01" value="${balance(inv)}">
+      <label>${tdsOn ? 'Amount settled against the invoice, before any TDS (₹)' : 'Amount received (₹)'}</label><input id="p-amt" type="number" min="0" step="0.01" value="${balance(inv)}">
+      ${tdsOn ? tdsBlock(0, 0) : ''}
       <div class="row c2"><div><label>Date received</label><input id="p-date" type="date" value="${today()}"></div>
       <div><label>Mode</label><select id="p-mode"><option>Bank transfer</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></div></div>
       <label>Note / reference (optional)</label><input id="p-note" placeholder="UTR / cheque no.">
       <div class="foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn primary" id="m-ok">Save payment</button></div>`);
+    const w = tdsOn ? wireTds(m, () => Number($('#p-amt', m).value) || 0) : null;
+    if (w) { w.upd(); $('#p-amt', m).addEventListener('input', () => w.refresh()); }
     $('#m-cancel', m).onclick = closeModal;
     $('#m-ok', m).onclick = guard(async () => {
       const amount = Number($('#p-amt', m).value);
       if (!(amount > 0)) return toast('Enter an amount', true);
-      await DB.recordPayment(inv, { amount, paid_on: $('#p-date', m).value, mode: $('#p-mode', m).value, note: $('#p-note', m).value }, S.user.name);
+      const t = w ? w.read() : {};
+      if (w && t.tds_amount > amount) return toast('The TDS cannot be more than the amount settled', true);
+      await DB.recordPayment(inv, { amount, paid_on: $('#p-date', m).value, mode: $('#p-mode', m).value, note: $('#p-note', m).value, ...t }, S.user.name);
       closeModal(); toast(amount >= balance(inv) ? 'Marked as paid' : 'Part payment recorded'); afterChange();
     });
   }
@@ -163,7 +185,8 @@
     toast('Invoice reopened'); afterChange();
   });
   const markUnpaid = guard(async inv => {
-    if (!confirm(`Reset ${inv.number} to unpaid? Recorded payments stay in the log but the balance is cleared.`)) return;
+    if (!confirm(`Reset ${inv.number} to unpaid? Its recorded payments (and any TDS noted on them) will be removed.`)) return;
+    await DB.deletePaymentsFor(inv.id);
     await DB.updateInvoice(inv.id, { status: 'pending', amount_paid: 0, paid_date: null }); toast('Marked unpaid'); afterChange();
   });
   const deleteDraft = guard(async inv => {
@@ -184,6 +207,9 @@
   function wireActions(root) {
     root.onclick = e => {
       if (e.target.closest('[data-stop]')) return;
+      const dp = e.target.closest('[data-delpay]'); if (dp) return removePayment(dp.dataset.delpay);
+      const te = e.target.closest('[data-tdsedit]'); if (te) { const en = tdsEntries().find(x => x.id === te.dataset.tdsedit); if (en) tdsModal(en); return; }
+      const tr = e.target.closest('[data-tdsrec]'); if (tr) { const en = tdsEntries().find(x => x.id === 'inv:' + tr.dataset.tdsrec); if (en) tdsModal(en); return; }
       const b = e.target.closest('[data-act]'); if (!b) return;
       e.stopPropagation();
       const inv = S.invoices.find(i => i.id === b.dataset.id); if (!inv) return;
@@ -235,6 +261,23 @@
     });
   }
 
+  function paymentsHTML(inv, pays) {
+    const rest = Number(inv.amount_paid || 0) - pays.reduce((a, p) => a + Number(p.amount), 0);
+    if (!pays.length && !(rest > 0.5 && S.tdsReady)) return '';
+    return `<div class="small"><b>Payments</b>${pays.map(p => `<div class="payline">₹${fmt(p.amount)} on ${dmy(p.paid_on)} (${esc(p.mode || '')}${p.note ? ', ' + esc(p.note) : ''})
+      ${Number(p.tds_amount) > 0 ? ` · <b>TDS ₹${fmt(p.tds_amount)}</b> (${fmt(p.tds_percent)}%) · cash ₹${fmt(p.amount - p.tds_amount)}${p.tds_claimed ? ' <span class="tag ok">claimed</span>' : ''}` : (S.tdsReady && p.tds_reviewed ? ' · no TDS' : '')}
+      ${S.tdsReady ? `<button class="link small" data-tdsedit="${p.id}">${p.tds_reviewed ? 'edit TDS' : 'add TDS'}</button>` : ''} <button class="link small" style="color:var(--bad)" data-delpay="${p.id}">remove</button></div>`).join('')}
+      ${rest > 0.5 && S.tdsReady ? `<div class="payline">₹${fmt(rest)} is counted as received but has no payment details. <button class="link small" data-tdsrec="${inv.id}">Add TDS details</button></div>` : ''}</div>`;
+  }
+  const removePayment = guard(async pid => {
+    const p = (S.payments || []).find(x => x.id === pid), inv = p && S.invoices.find(i => i.id === p.invoice_id); if (!p || !inv) return toast('Payment not found. Reload the page.', true);
+    if (!confirm(`Remove this payment of ₹${fmt(p.amount)} from ${inv.number}? The invoice balance goes back up.`)) return;
+    await DB.deletePayment(pid);
+    const paid = Math.max(0, Number(inv.amount_paid || 0) - Number(p.amount));
+    await DB.updateInvoice(inv.id, { amount_paid: paid, status: paid >= Number(inv.total) ? 'paid' : paid > 0 ? 'partial' : 'pending', paid_date: paid >= Number(inv.total) ? inv.paid_date : null });
+    closeModal(); toast('Payment removed'); afterChange();
+  });
+
   /* ---------- view one invoice ---------- */
   async function viewInvoice(inv) {
     const pays = await DB.listPayments(inv.id);
@@ -249,7 +292,7 @@
         ${actions(inv)}
       </div>
       ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
-      ${pays.length ? `<p class="small"><b>Payments:</b> ${pays.map(p => `₹${fmt(p.amount)} on ${dmy(p.paid_on)} (${esc(p.mode || '')}${p.note ? ', ' + esc(p.note) : ''})`).join(' · ')}</p>` : ''}
+      ${paymentsHTML(inv, pays)}
       <div class="previewwrap"><div class="scale" id="vscale">${paperHTML(inv)}</div></div>`, { wide: true });
     $('#m-close', m).onclick = closeModal;
     wireActions(m);
@@ -432,6 +475,86 @@
     wireActions($('#view'));
   }
 
+  /* ---------- TDS: tax clients cut from payments, with a review of past payments ---------- */
+  const fyStart = iso => (+iso.slice(5, 7) >= 4 ? +iso.slice(0, 4) : +iso.slice(0, 4) - 1);
+  const fyName = y => `${y}-${String(y + 1).slice(2)}`;
+  function tdsEntries() { // every payment received, plus money counted as received that has no payment record yet
+    const by = {}; (S.payments || []).forEach(p => (by[p.invoice_id] = by[p.invoice_id] || []).push(p));
+    const out = [];
+    S.invoices.filter(i => !['draft', 'cancelled'].includes(i.status) && Number(i.amount_paid || 0) > 0).forEach(inv => {
+      const ps = by[inv.id] || [];
+      ps.forEach(p => out.push({ id: p.id, kind: 'pay', inv, date: p.paid_on, gross: Number(p.amount), pct: Number(p.tds_percent) || 0, tds: Number(p.tds_amount) || 0, reviewed: !!p.tds_reviewed || Number(p.tds_amount) > 0, claimed: !!p.tds_claimed, claimedOn: p.tds_claimed_on }));
+      const rest = Number(inv.amount_paid) - ps.reduce((a, p) => a + Number(p.amount), 0);
+      if (rest > 0.5) out.push({ id: 'inv:' + inv.id, kind: 'legacy', inv, date: inv.paid_date || inv.issue_date, gross: rest, pct: 0, tds: 0, reviewed: false, claimed: false });
+    });
+    return out;
+  }
+  function tdsModal(e) {
+    const m = modal(`<h3>TDS · ${esc(e.inv.number)} · ${esc(e.inv.client_name)}</h3>
+      <p class="muted">Payment of <b>₹${fmt(e.gross)}</b> ${e.kind === 'legacy' ? '(counted as received, no payment details yet)' : 'on ' + dmy(e.date)}</p>
+      ${e.kind === 'legacy' ? `<label>Date the payment arrived</label><input id="t-date" type="date" value="${e.date}">` : ''}
+      ${tdsBlock(e.pct, e.tds)}
+      <div class="foot"><button class="btn" id="m-x">Cancel</button><button class="btn primary" id="m-ok">Save</button></div>`);
+    const w = wireTds(m, () => e.gross); w.refresh();
+    $('#m-x', m).onclick = closeModal;
+    $('#m-ok', m).onclick = guard(async () => {
+      const t = w.read(); if (t.tds_amount > e.gross) return toast('The TDS cannot be more than the payment', true);
+      if (e.kind === 'pay') await DB.updatePayment(e.id, { ...t, tds_reviewed: true, ...(t.tds_amount ? {} : { tds_claimed: false, tds_claimed_on: null }) });
+      else await DB.addPaymentRecord(e.inv, { amount: e.gross, paid_on: $('#t-date', m).value || e.date, mode: 'Bank transfer', note: 'Added during TDS review', ...t }, S.user.name);
+      closeModal(); toast('TDS saved'); await afterChange();
+    });
+  }
+  const markNoTds = guard(async list => {
+    for (const e of list) { if (e.kind === 'pay') await DB.updatePayment(e.id, { tds_reviewed: true, tds_percent: 0, tds_amount: 0 }); else await DB.addPaymentRecord(e.inv, { amount: e.gross, paid_on: e.date, mode: 'Bank transfer', note: 'Checked: no TDS', tds_percent: 0, tds_amount: 0 }, S.user.name); }
+    toast(`${list.length} marked as no TDS`); await afterChange();
+  });
+  const setClaimed = guard(async (ids, val) => { for (const id of ids) await DB.updatePayment(id, { tds_claimed: val, tds_claimed_on: val ? today() : null }); toast(val ? 'Marked as claimed' : 'Marked as not claimed'); await afterChange(); });
+  function viewTds() {
+    if (!S.tdsReady) { $('#view').innerHTML = `<div class="card" style="max-width:640px;margin:40px auto"><h3>One-time setup needed</h3><p>TDS tracking needs a small database update. In Supabase open <b>SQL Editor → New query</b>, paste <code>supabase/migration-tds-vendor.sql</code>, click <b>Run</b>, then reload this page.</p></div>`; return; }
+    const F = viewTds.f || (viewTds.f = { fy: fyStart(today()), view: 'review', sel: new Set() });
+    const all = tdsEntries(), fys = [...new Set([...all.map(e => fyStart(e.date)), fyStart(today())])].sort().reverse(); if (!fys.includes(F.fy)) F.fy = fys[0];
+    const ents = all.filter(e => fyStart(e.date) === F.fy).sort((a, b) => b.date.localeCompare(a.date));
+    const review = ents.filter(e => !e.reviewed), withT = ents.filter(e => e.reviewed && e.tds > 0), none = ents.filter(e => e.reviewed && e.tds === 0);
+    const tot = withT.reduce((a, e) => a + e.tds, 0), claimed = withT.filter(e => e.claimed).reduce((a, e) => a + e.tds, 0), reviewGross = review.reduce((a, e) => a + e.gross, 0);
+    const list = { review, tds: withT, none, all: ents }[F.view]; F.sel = new Set([...F.sel].filter(id => review.some(e => e.id === id)));
+    const byClient = {}; withT.forEach(e => { const c = (byClient[e.inv.client_name] = byClient[e.inv.client_name] || { n: 0, gross: 0, tds: 0, claimed: 0, ids: [] }); c.n++; c.gross += e.gross; c.tds += e.tds; if (e.claimed) c.claimed += e.tds; else c.ids.push(e.id); });
+    const stat = e => (!e.reviewed ? '<span class="chip pending">Not checked</span>' : e.tds > 0 ? `<label class="check" style="margin:0"><input type="checkbox" data-claim="${e.id}" ${e.claimed ? 'checked' : ''}> ${e.claimed ? 'Claimed' + (e.claimedOn ? ' ' + dmy(e.claimedOn) : '') : 'Claim'}</label>` : '<span class="muted small">No TDS</span>');
+    $('#view').innerHTML = `<div class="bar"><label style="margin:0">Financial year</label><select id="t-fy">${fys.map(y => `<option value="${y}" ${y === F.fy ? 'selected' : ''}>FY ${fyName(y)}</option>`).join('')}</select><span class="muted small">April–March, by date of payment</span><span class="grow"></span><button class="btn" id="t-csv">Download for accountant (CSV)</button></div>
+      <div class="stats"><div class="stat"><div class="n">₹${fmt(tot)}</div><div class="l">TDS withheld by clients (${withT.length} payment${withT.length === 1 ? '' : 's'})</div></div>
+        <div class="stat"><div class="n" style="color:var(--ok)">₹${fmt(claimed)}</div><div class="l">Already claimed</div></div>
+        <div class="stat"><div class="n" style="color:var(--warn)">₹${fmt(tot - claimed)}</div><div class="l">Still to claim back</div></div>
+        <div class="stat"><div class="n" style="color:${review.length ? 'var(--bad)' : 'inherit'}">${review.length}</div><div class="l">Payments not checked for TDS yet${review.length ? ' (₹' + fmt(reviewGross) + ')' : ''}</div></div></div>
+      ${review.length ? `<div class="card" style="background:#fff8e6;border-color:#f0d588"><b>Check your earlier payments.</b> ${review.length} payment${review.length === 1 ? ' this year has' : 's this year have'} not been checked for TDS. For each one, click <b>Add TDS</b> if the client deducted tax, or <b>No TDS</b> if they paid in full. You can tick several and mark them all <b>No TDS</b> at once.</div>` : ''}
+      <div class="bar">${[['review', `Needs checking (${review.length})`], ['tds', `With TDS (${withT.length})`], ['none', `No TDS (${none.length})`], ['all', `All (${ents.length})`]].map(([k, l]) => `<button class="btn sm ${F.view === k ? 'primary' : ''}" data-view="${k}">${l}</button>`).join('')}
+        ${F.view === 'review' && review.length ? `<span class="grow"></span><button class="btn sm" id="t-none-sel" ${F.sel.size ? '' : 'disabled'}>Mark ${F.sel.size || 'selected'} as “No TDS”</button>` : ''}</div>
+      ${list.length ? `<table class="list rtable"><tr><th>${F.view === 'review' ? '<input type="checkbox" id="t-all" style="width:auto">' : ''}</th><th data-title>Invoice</th><th>Date</th><th>Client</th><th class="r">Received (before TDS)</th><th class="r">TDS %</th><th class="r">TDS ₹</th><th class="r">Cash in bank</th><th>Status</th><th></th></tr>${list.map(e => `<tr>
+        <td>${!e.reviewed ? `<input type="checkbox" data-sel="${e.id}" ${F.sel.has(e.id) ? 'checked' : ''} style="width:auto">` : ''}</td><td class="nowrap"><b><a href="#" data-openinv="${e.inv.id}">${esc(e.inv.number)}</a></b></td><td class="nowrap">${dmy(e.date)}</td><td>${esc(e.inv.client_name)}</td>
+        <td class="r nowrap">₹${fmt(e.gross)}</td><td class="r nowrap">${e.reviewed && e.tds ? fmt(e.pct) + '%' : '—'}</td><td class="r nowrap">${e.reviewed && e.tds ? '₹' + fmt(e.tds) : '—'}</td><td class="r nowrap">${e.reviewed ? '₹' + fmt(e.gross - e.tds) : '—'}</td><td class="nowrap">${stat(e)}</td>
+        <td class="r nowrap">${e.reviewed ? `<button class="btn sm" data-edit="${e.id}">Edit</button>` : `<button class="btn sm primary" data-edit="${e.id}">Add TDS</button> <button class="btn sm" data-none="${e.id}">No TDS</button>`}</td></tr>`).join('')}</table>` : `<div class="empty">${F.view === 'review' ? 'Everything this year has been checked. ✓' : 'Nothing here.'}</div>`}
+      ${Object.keys(byClient).length ? `<div class="card" style="margin-top:16px"><h3>TDS by client — FY ${fyName(F.fy)}</h3><table class="list rtable"><tr><th data-title>Client</th><th class="r">Payments</th><th class="r">Received</th><th class="r">TDS withheld</th><th class="r">Claimed</th><th class="r">To claim</th><th></th></tr>${Object.entries(byClient).sort((a, b) => b[1].tds - a[1].tds).map(([n, c]) => `<tr><td><b>${esc(n)}</b></td><td class="r">${c.n}</td><td class="r nowrap">₹${fmt(c.gross)}</td><td class="r nowrap">₹${fmt(c.tds)}</td><td class="r nowrap">₹${fmt(c.claimed)}</td><td class="r nowrap"><b>₹${fmt(c.tds - c.claimed)}</b></td><td class="r">${c.ids.length ? `<button class="btn sm" data-claimall="${esc(n)}">Mark all claimed</button>` : ''}</td></tr>`).join('')}</table></div>` : ''}`;
+    $('#t-fy').onchange = e => { F.fy = +e.target.value; F.sel.clear(); viewTds(); };
+    $('#view').onclick = e => {
+      const t = e.target.closest('button, a'); if (!t) return; const d = t.dataset;
+      if (d.view) { F.view = d.view; F.sel.clear(); viewTds(); }
+      else if (d.openinv) { e.preventDefault(); const inv = S.invoices.find(i => i.id === d.openinv); if (inv) viewInvoice(inv); }
+      else if (d.edit) tdsModal(ents.find(x => x.id === d.edit));
+      else if (d.none) markNoTds([ents.find(x => x.id === d.none)]);
+      else if (t.id === 't-none-sel') markNoTds(review.filter(x => F.sel.has(x.id)));
+      else if (d.claimall) setClaimed(byClient[d.claimall].ids, true);
+      else if (t.id === 't-csv') {
+        const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const csv = ['Payment date,Invoice,Client,Received before TDS,TDS %,TDS amount,Cash in bank,Checked for TDS,Claimed,Claimed on'].concat(ents.slice().reverse().map(x => [dmy(x.date), x.inv.number, x.inv.client_name, x.gross, x.reviewed ? x.pct : '', x.reviewed ? x.tds : '', x.reviewed ? x.gross - x.tds : '', x.reviewed ? 'Yes' : 'No', x.tds > 0 ? (x.claimed ? 'Yes' : 'No') : '', dmy(x.claimedOn)].map(q).join(','))).join('\n');
+        saveBlob(new Blob(['\ufeff' + csv], { type: 'text/csv' }), `GFE_TDS_FY_${fyName(F.fy)}.csv`);
+      }
+    };
+    $('#view').onchange = e => {
+      const t = e.target;
+      if (t.dataset.sel) { t.checked ? F.sel.add(t.dataset.sel) : F.sel.delete(t.dataset.sel); const b = $('#t-none-sel'); if (b) { b.disabled = !F.sel.size; b.textContent = `Mark ${F.sel.size || 'selected'} as “No TDS”`; } }
+      else if (t.id === 't-all') { $$('[data-sel]').forEach(c => { c.checked = t.checked; t.checked ? F.sel.add(c.dataset.sel) : F.sel.delete(c.dataset.sel); }); const b = $('#t-none-sel'); if (b) { b.disabled = !F.sel.size; b.textContent = `Mark ${F.sel.size || 'selected'} as “No TDS”`; } }
+      else if (t.dataset.claim) setClaimed([t.dataset.claim], t.checked);
+    };
+  }
+
   /* ---------- DASHBOARD ---------- */
   function viewDashboard() {
     const fys = [...new Set(S.invoices.filter(i => i.prefix).map(i => i.prefix))].sort().reverse();
@@ -449,7 +572,9 @@
       <div class="stats"><div class="stat"><div class="n">₹${fmt(billed)}</div><div class="l">Billed (${live.length} invoices)</div></div>
       <div class="stat"><div class="n" style="color:var(--ok)">₹${fmt(got)}</div><div class="l">Received</div></div>
       <div class="stat"><div class="n" style="color:var(--warn)">₹${fmt(billed - got)}</div><div class="l">Pending</div></div>
-      <div class="stat"><div class="n">₹${fmt(month)}</div><div class="l">Billed this month</div></div></div>
+      <div class="stat"><div class="n">₹${fmt(month)}</div><div class="l">Billed this month</div></div>
+      ${S.tdsReady ? (() => { const sy = 2000 + Number(cur.slice(2)), te = tdsEntries().filter(e => fyStart(e.date) === sy && e.reviewed && e.tds > 0), tt = te.reduce((a, e) => a + e.tds, 0), tc = te.filter(e => e.claimed).reduce((a, e) => a + e.tds, 0), nr = tdsEntries().filter(e => fyStart(e.date) === sy && !e.reviewed).length;
+        return `<div class="stat"><div class="n">₹${fmt(tt - tc)}</div><div class="l">TDS still to claim (of ₹${fmt(tt)} withheld) · <a href="#tds">${nr ? nr + ' payments to check' : 'open TDS'}</a></div></div>`; })() : ''}</div>
       <div class="card"><h3>Billed per month</h3><div class="bars">${byM.map((v, k) => `<div class="b" title="₹${fmt(v)}"><i style="height:${(v / mx) * 120}px"></i><span>${months[k].label}</span></div>`).join('')}</div></div>
       <div class="card"><h3>Top clients</h3>${top.length ? `<table class="list">${top.map(([n, v]) => `<tr><td>${esc(n)}</td><td class="r">₹${fmt(v)}</td></tr>`).join('')}</table>` : '<p class="muted">No data yet.</p>'}</div>`;
     $('#fy').onchange = e => { viewDashboard.fy = e.target.value; viewDashboard(); };
@@ -534,8 +659,8 @@
     $('#x-csv').onclick = () => {
       const rows = range().slice().sort((a, b) => a.issue_date.localeCompare(b.issue_date) || a.seq - b.seq); if (!rows.length) return toast('No invoices in that range', true);
       const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by,Chasing,Next follow-up,POC,POC phone,POC email,Last note']
-        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by, i.follow_up_owner, dmy(i.next_follow_up), i.poc_name, i.poc_phone, i.poc_email, (notesOf(i)[0] || {}).note].map(q).join(','))).join('\n');
+      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by,Chasing,Next follow-up,POC,POC phone,POC email,Last note,TDS withheld,Cash in bank']
+        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by, i.follow_up_owner, dmy(i.next_follow_up), i.poc_name, i.poc_phone, i.poc_email, (notesOf(i)[0] || {}).note, (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0), Number(i.amount_paid || 0) - (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0)].map(q).join(','))).join('\n');
       saveBlob(new Blob(['﻿' + csv], { type: 'text/csv' }), `GFE_invoice_register_${$('#x1').value || 'start'}_to_${$('#x2').value || 'today'}.csv`);
     };
     $('#x-zip').onclick = guard(async () => {
@@ -568,7 +693,7 @@
     $$('#nav a').forEach(x => x.classList.toggle('on', x.dataset.tab === t));
     if (t !== 'admin') S.unlocked = false;
     window.onresize = null; $('#view').oninput = $('#view').onchange = null;
-    const run = { new: () => viewEditor(a === 'x' ? null : a, b), history: viewHistory, pending: viewPending, dashboard: viewDashboard, admin: viewAdmin }[t] || (() => (location.hash = '#new'));
+    const run = { new: () => viewEditor(a === 'x' ? null : a, b), history: viewHistory, pending: viewPending, dashboard: viewDashboard, tds: viewTds, admin: viewAdmin }[t] || (() => (location.hash = '#new'));
     guard(run)();
   }
 
