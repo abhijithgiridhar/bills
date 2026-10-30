@@ -23,7 +23,7 @@
 
   /* ---------- ui helpers ---------- */
   function toast(msg, err) { const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : ''); t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), err ? 6000 : 2200); }
-  const guard = fn => async (...a) => { try { return await fn(...a); } catch (e) { console.error(e); toast(e.message || String(e), true); } };
+  const guard = fn => { let busy = false; return async (...a) => { if (busy) return; busy = true; try { return await fn(...a); } catch (e) { console.error(e); toast(e.message || String(e), true); } finally { busy = false; } }; }; // ignores a second click while the first is still saving
   function modal(html, cls) { const r = $('#modal-root'); r.innerHTML = `<div class="modal-bg"><div class="modal ${cls || ''}">${html}</div></div>`; $('.modal-bg', r).addEventListener('mousedown', e => { if (e.target.classList.contains('modal-bg')) closeModal(); }); return $('.modal', r); }
   const closeModal = () => ($('#modal-root').innerHTML = '');
 

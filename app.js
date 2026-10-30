@@ -27,7 +27,7 @@
     const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : ''); t.hidden = false;
     clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), err ? 5000 : 2200);
   }
-  const guard = fn => async (...a) => { try { return await fn(...a); } catch (e) { console.error(e); toast(e.message || String(e), true); } };
+  const guard = fn => { let busy = false; return async (...a) => { if (busy) return; busy = true; try { return await fn(...a); } catch (e) { console.error(e); toast(e.message || String(e), true); } finally { busy = false; } }; }; // ignores a second click while the first is still saving
   function modal(html, { wide } = {}) {
     const root = $('#modal-root');
     root.innerHTML = `<div class="modal-bg"><div class="modal ${wide ? 'wide' : ''}">${html}</div></div>`;
@@ -273,7 +273,8 @@
     const p = (S.payments || []).find(x => x.id === pid), inv = p && S.invoices.find(i => i.id === p.invoice_id); if (!p || !inv) return toast('Payment not found. Reload the page.', true);
     if (!confirm(`Remove this payment of ₹${fmt(p.amount)} from ${inv.number}? The invoice balance goes back up.`)) return;
     await DB.deletePayment(pid);
-    const paid = Math.max(0, Number(inv.amount_paid || 0) - Number(p.amount));
+    const remaining = (S.payments || []).filter(x => x.invoice_id === inv.id && x.id !== pid).reduce((a, x) => a + Number(x.amount), 0);
+    const paid = Math.max(remaining, Math.max(0, Number(inv.amount_paid || 0) - Number(p.amount)));   // a duplicate record never lowers what was really received
     await DB.updateInvoice(inv.id, { amount_paid: paid, status: paid >= Number(inv.total) ? 'paid' : paid > 0 ? 'partial' : 'pending', paid_date: paid >= Number(inv.total) ? inv.paid_date : null });
     closeModal(); toast('Payment removed'); afterChange();
   });
@@ -489,6 +490,20 @@
     });
     return out;
   }
+  function dupInvoices() { // an invoice whose payment records add up to MORE than was actually received: a duplicate record
+    const by = {}; (S.payments || []).forEach(p => (by[p.invoice_id] = by[p.invoice_id] || []).push(p));
+    return S.invoices.filter(i => !['draft', 'cancelled'].includes(i.status)).map(inv => { const ps = by[inv.id] || [], sum = ps.reduce((a, p) => a + Number(p.amount), 0); return ps.length > 1 && sum > Number(inv.amount_paid || 0) + 0.5 ? { inv, ps, sum } : null; }).filter(Boolean);
+  }
+  const describePay = p => `₹${fmt(p.amount)}, ${Number(p.tds_amount) > 0 ? 'TDS ₹' + fmt(p.tds_amount) : p.tds_reviewed ? 'no TDS' : 'not checked'}`;
+  const fixDuplicate = guard(async inv => {
+    const ps = (S.payments || []).filter(p => p.invoice_id === inv.id), rank = p => (Number(p.tds_amount) > 0 ? 0 : p.tds_reviewed ? 1 : 2);
+    const sorted = ps.slice().sort((a, b) => rank(a) - rank(b) || String(a.created_at || a.paid_on).localeCompare(String(b.created_at || b.paid_on))), keep = []; let acc = 0;
+    sorted.forEach(p => { if (acc + Number(p.amount) <= Number(inv.amount_paid || 0) + 0.5) { keep.push(p); acc += Number(p.amount); } }); if (!keep.length) keep.push(sorted[0]);
+    const drop = ps.filter(p => !keep.includes(p));
+    if (!confirm(`Invoice ${inv.number}: keep ${keep.map(describePay).join(' and ')}, and remove the duplicate record${drop.length === 1 ? '' : 's'} (${drop.map(describePay).join('; ')})?\n\nThe amount received on the invoice does not change.`)) return;
+    for (const p of drop) await DB.deletePayment(p.id);
+    toast('Duplicate removed'); await afterChange();
+  });
   function tdsModal(e) {
     const m = modal(`<h3>TDS · ${esc(e.inv.number)} · ${esc(e.inv.client_name)}</h3>
       <p class="muted">Payment of <b>₹${fmt(e.gross)}</b> ${e.kind === 'legacy' ? '(counted as received, no payment details yet)' : 'on ' + dmy(e.date)}</p>
@@ -516,6 +531,7 @@
     const ents = all.filter(e => fyStart(e.date) === F.fy).sort((a, b) => b.date.localeCompare(a.date));
     const review = ents.filter(e => !e.reviewed), withT = ents.filter(e => e.reviewed && e.tds > 0), none = ents.filter(e => e.reviewed && e.tds === 0);
     const tot = withT.reduce((a, e) => a + e.tds, 0), claimed = withT.filter(e => e.claimed).reduce((a, e) => a + e.tds, 0), reviewGross = review.reduce((a, e) => a + e.gross, 0);
+    const dups = dupInvoices(), nOf = {}, ixOf = {}; all.slice().sort((a, b) => a.date.localeCompare(b.date) || String(a.id).localeCompare(String(b.id))).forEach(e => { nOf[e.inv.id] = (nOf[e.inv.id] || 0) + 1; ixOf[e.id] = nOf[e.inv.id]; });
     const list = { review, tds: withT, none, all: ents }[F.view]; F.sel = new Set([...F.sel].filter(id => review.some(e => e.id === id)));
     const byClient = {}; withT.forEach(e => { const c = (byClient[e.inv.client_name] = byClient[e.inv.client_name] || { n: 0, gross: 0, tds: 0, claimed: 0, ids: [] }); c.n++; c.gross += e.gross; c.tds += e.tds; if (e.claimed) c.claimed += e.tds; else c.ids.push(e.id); });
     const stat = e => (!e.reviewed ? '<span class="chip pending">Not checked</span>' : e.tds > 0 ? `<label class="check" style="margin:0"><input type="checkbox" data-claim="${e.id}" ${e.claimed ? 'checked' : ''}> ${e.claimed ? 'Claimed' + (e.claimedOn ? ' ' + dmy(e.claimedOn) : '') : 'Claim'}</label>` : '<span class="muted small">No TDS</span>');
@@ -524,11 +540,12 @@
         <div class="stat"><div class="n" style="color:var(--ok)">₹${fmt(claimed)}</div><div class="l">Already claimed</div></div>
         <div class="stat"><div class="n" style="color:var(--warn)">₹${fmt(tot - claimed)}</div><div class="l">Still to claim back</div></div>
         <div class="stat"><div class="n" style="color:${review.length ? 'var(--bad)' : 'inherit'}">${review.length}</div><div class="l">Payments not checked for TDS yet${review.length ? ' (₹' + fmt(reviewGross) + ')' : ''}</div></div></div>
+      ${dups.map(d => `<div class="card" style="background:#fdecea;border-color:#f3b8b0"><b>Invoice ${esc(d.inv.number)} (${esc(d.inv.client_name)}) looks duplicated.</b> It has ${d.ps.length} payment records adding up to ₹${fmt(d.sum)}, but only ₹${fmt(d.inv.amount_paid)} was received: ${d.ps.map(describePay).join(' · ')}. <button class="btn sm primary" data-fixdup="${d.inv.id}" style="margin-left:6px">Keep one, remove the duplicate</button></div>`).join('')}
       ${review.length ? `<div class="card" style="background:#fff8e6;border-color:#f0d588"><b>Check your earlier payments.</b> ${review.length} payment${review.length === 1 ? ' this year has' : 's this year have'} not been checked for TDS. For each one, click <b>Add TDS</b> if the client deducted tax, or <b>No TDS</b> if they paid in full. You can tick several and mark them all <b>No TDS</b> at once.</div>` : ''}
       <div class="bar">${[['review', `Needs checking (${review.length})`], ['tds', `With TDS (${withT.length})`], ['none', `No TDS (${none.length})`], ['all', `All (${ents.length})`]].map(([k, l]) => `<button class="btn sm ${F.view === k ? 'primary' : ''}" data-view="${k}">${l}</button>`).join('')}
         ${F.view === 'review' && review.length ? `<span class="grow"></span><button class="btn sm" id="t-none-sel" ${F.sel.size ? '' : 'disabled'}>Mark ${F.sel.size || 'selected'} as “No TDS”</button>` : ''}</div>
       ${list.length ? `<table class="list rtable"><tr><th>${F.view === 'review' ? '<input type="checkbox" id="t-all" style="width:auto">' : ''}</th><th data-title>Invoice</th><th>Date</th><th>Client</th><th class="r">Received (before TDS)</th><th class="r">TDS %</th><th class="r">TDS ₹</th><th class="r">Cash in bank</th><th>Status</th><th></th></tr>${list.map(e => `<tr>
-        <td>${!e.reviewed ? `<input type="checkbox" data-sel="${e.id}" ${F.sel.has(e.id) ? 'checked' : ''} style="width:auto">` : ''}</td><td class="nowrap"><b><a href="#" data-openinv="${e.inv.id}">${esc(e.inv.number)}</a></b></td><td class="nowrap">${dmy(e.date)}</td><td>${esc(e.inv.client_name)}</td>
+        <td>${!e.reviewed ? `<input type="checkbox" data-sel="${e.id}" ${F.sel.has(e.id) ? 'checked' : ''} style="width:auto">` : ''}</td><td class="nowrap"><b><a href="#" data-openinv="${e.inv.id}">${esc(e.inv.number)}</a></b>${nOf[e.inv.id] > 1 ? `<div class="small muted">payment ${ixOf[e.id]} of ${nOf[e.inv.id]}</div>` : ''}</td><td class="nowrap">${dmy(e.date)}</td><td>${esc(e.inv.client_name)}</td>
         <td class="r nowrap">₹${fmt(e.gross)}</td><td class="r nowrap">${e.reviewed && e.tds ? fmt(e.pct) + '%' : '—'}</td><td class="r nowrap">${e.reviewed && e.tds ? '₹' + fmt(e.tds) : '—'}</td><td class="r nowrap">${e.reviewed ? '₹' + fmt(e.gross - e.tds) : '—'}</td><td class="nowrap">${stat(e)}</td>
         <td class="r nowrap">${e.reviewed ? `<button class="btn sm" data-edit="${e.id}">Edit</button>` : `<button class="btn sm primary" data-edit="${e.id}">Add TDS</button> <button class="btn sm" data-none="${e.id}">No TDS</button>`}</td></tr>`).join('')}</table>` : `<div class="empty">${F.view === 'review' ? 'Everything this year has been checked. ✓' : 'Nothing here.'}</div>`}
       ${Object.keys(byClient).length ? `<div class="card" style="margin-top:16px"><h3>TDS by client — FY ${fyName(F.fy)}</h3><table class="list rtable"><tr><th data-title>Client</th><th class="r">Payments</th><th class="r">Received</th><th class="r">TDS withheld</th><th class="r">Claimed</th><th class="r">To claim</th><th></th></tr>${Object.entries(byClient).sort((a, b) => b[1].tds - a[1].tds).map(([n, c]) => `<tr><td><b>${esc(n)}</b></td><td class="r">${c.n}</td><td class="r nowrap">₹${fmt(c.gross)}</td><td class="r nowrap">₹${fmt(c.tds)}</td><td class="r nowrap">₹${fmt(c.claimed)}</td><td class="r nowrap"><b>₹${fmt(c.tds - c.claimed)}</b></td><td class="r">${c.ids.length ? `<button class="btn sm" data-claimall="${esc(n)}">Mark all claimed</button>` : ''}</td></tr>`).join('')}</table></div>` : ''}`;
@@ -536,6 +553,7 @@
     $('#view').onclick = e => {
       const t = e.target.closest('button, a'); if (!t) return; const d = t.dataset;
       if (d.view) { F.view = d.view; F.sel.clear(); viewTds(); }
+      else if (d.fixdup) fixDuplicate(S.invoices.find(i => i.id === d.fixdup));
       else if (d.openinv) { e.preventDefault(); const inv = S.invoices.find(i => i.id === d.openinv); if (inv) viewInvoice(inv); }
       else if (d.edit) tdsModal(ents.find(x => x.id === d.edit));
       else if (d.none) markNoTds([ents.find(x => x.id === d.none)]);
