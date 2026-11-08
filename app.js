@@ -10,6 +10,24 @@
   const S = { user: null, settings: null, brands: [], clients: [], invoices: [], unlocked: false };
   const DB = window.DB;
 
+  /* ---------- place of supply (GST state codes) + HSN / SAC ---------- */
+  const STATES = [['Karnataka', '29'], ['Andaman and Nicobar Islands', '35'], ['Andhra Pradesh', '37'], ['Arunachal Pradesh', '12'], ['Assam', '18'], ['Bihar', '10'], ['Chandigarh', '04'], ['Chhattisgarh', '22'],
+    ['Dadra and Nagar Haveli and Daman and Diu', '26'], ['Delhi', '07'], ['Goa', '30'], ['Gujarat', '24'], ['Haryana', '06'], ['Himachal Pradesh', '02'], ['Jammu and Kashmir', '01'], ['Jharkhand', '20'], ['Kerala', '32'],
+    ['Ladakh', '38'], ['Lakshadweep', '31'], ['Madhya Pradesh', '23'], ['Maharashtra', '27'], ['Manipur', '14'], ['Meghalaya', '17'], ['Mizoram', '15'], ['Nagaland', '13'], ['Odisha', '21'], ['Puducherry', '34'], ['Punjab', '03'],
+    ['Rajasthan', '08'], ['Sikkim', '11'], ['Tamil Nadu', '33'], ['Telangana', '36'], ['Tripura', '16'], ['Uttar Pradesh', '09'], ['Uttarakhand', '05'], ['West Bengal', '19'], ['Other territory', '97'], ['Outside India (export)', '96']];
+  const DEFAULT_PLACE = 'Karnataka';
+  const placeOf = inv => inv.place_of_supply || DEFAULT_PLACE;   // older invoices have no value stored, so they read as Karnataka
+  const stateCode = name => (STATES.find(x => x[0] === name) || [])[1] || '';
+  const placeText = inv => { const p = placeOf(inv), c = stateCode(p); return c ? `${p} (${c})` : p; };
+  const ALIASES = { 'new delhi': 'Delhi', bengaluru: 'Karnataka', bangalore: 'Karnataka', mysuru: 'Karnataka', mysore: 'Karnataka', bylakuppe: 'Karnataka' };
+  function suggestPlace(gst, addr) { // from the first two digits of a GSTIN, else a state name in the address
+    const m = /^(\d{2})[A-Z0-9]{13}$/i.exec((gst || '').replace(/\s/g, '')) || /GST[^0-9]*(\d{2})/i.exec(gst || ''); if (m) { const st = STATES.find(x => x[1] === m[1]); if (st) return st[0]; }
+    const t = (addr || '').toLowerCase(); if (!t) return null;
+    for (const [k, v] of Object.entries(ALIASES)) if (t.includes(k)) return v;
+    const hit = STATES.slice(0, -2).find(x => t.includes(x[0].toLowerCase())); return hit ? hit[0] : null;
+  }
+  const codeLabel = c => { const lib = ((S.settings && S.settings.hsn_codes) || []).find(x => x.code === c); const t = (lib && lib.type) || (String(c).startsWith('99') ? 'SAC' : 'HSN'); return `${t} ${c}`; };
+
   /* ---------- money ---------- */
   const lineTotal = i => (i.total !== undefined && i.total !== null && i.total !== '' ? Number(i.total) : (Number(i.qty) || 0) * (Number(i.unit) || 0));
   function totals(inv) {
@@ -44,7 +62,7 @@
     const logo = logoOf(b);
     const rows = inv.items.map((i, n) => {
       const showUnit = !(Number(i.unit) === 0 && Number(i.qty) === 0) && i.unit !== '' && i.unit !== null;
-      return `<tr class="${n === 0 ? 'first' : ''}"><td>${esc(i.desc)}</td><td>${showUnit ? fmt(i.unit) : '-'}</td><td>${i.qty === '' || i.qty === null || (!Number(i.qty) && !showUnit) ? '-' : fmt(i.qty)}</td><td>${fmt(lineTotal(i))}</td></tr>`;
+      return `<tr class="${n === 0 ? 'first' : ''}"><td>${esc(i.desc)}${S.settings.hsn_enabled && i.code ? `<div class="hsn">${esc(codeLabel(i.code))}</div>` : ''}</td><td>${showUnit ? fmt(i.unit) : '-'}</td><td>${i.qty === '' || i.qty === null || (!Number(i.qty) && !showUnit) ? '-' : fmt(i.qty)}</td><td>${fmt(lineTotal(i))}</td></tr>`;
     }).join('');
     const extra = [];
     if (st.discount_enabled && Number(inv.discount)) extra.push(`<div><span>SUBTOTAL</span><span>${fmt(t.subtotal)}</span></div><div><span>DISCOUNT</span><span>- ${fmt(t.discount)}</span></div>`);
@@ -55,7 +73,7 @@
         <div class="head">${logo ? `<img src="${esc(logo)}" crossorigin="anonymous" alt="">` : `<div class="nologo">${esc(b.name)}</div>`}
           <div class="title">${esc(b.title_line).replace(/(Plot Twist Games)\s/, '$1<br>')}</div></div>
         <div class="meta">
-          <div><div class="lbl">Issued to:</div><div class="txt">${esc(inv.client_name)}${inv.client_address ? '\n' + esc(inv.client_address) : ''}${inv.client_gst ? '\nGST No: ' + esc(inv.client_gst) : ''}</div></div>
+          <div><div class="lbl">Issued to:</div><div class="txt">${esc(inv.client_name)}${inv.client_address ? '\n' + esc(inv.client_address) : ''}${inv.client_gst ? '\nGST No: ' + esc(inv.client_gst) : ''}\nPlace of supply: ${esc(placeText(inv))}</div></div>
           <div class="no"><div><span class="lbl">Invoice no:</span><b class="v">${esc(inv.number || 'DRAFT')}</b></div><div><span class="lbl">Date:</span><span class="v">${dmy(inv.issue_date)}</span></div></div>
         </div>
         <div class="payto"><div class="lbl">Pay to:</div><div class="txt">${esc(st.bank_name)}\nAccount Name: ${esc(st.account_name)}\nAccount No.: ${esc(st.account_no)}\nIFSC Code: ${esc(st.ifsc)}\nGST : ${esc(st.gst_no)}</div></div>
@@ -124,6 +142,7 @@
     [S.settings, S.brands, S.clients, S.invoices] = await Promise.all([DB.getSettings(), DB.listBrands(), DB.listClients(), DB.listInvoices()]);
     try { S.projects = await DB.listProjectsLite(); } catch { S.projects = null; } // null = project tables not set up yet
     try { S.notes = await DB.listInvoiceNotes(); S.team = await DB.listTeam(); } catch { S.notes = null; } // null = follow-up tables not set up yet
+    try { S.placeReady = await DB.placeReady(); } catch { S.placeReady = false; }   // false = place_of_supply column not set up yet
     try { S.tdsReady = await DB.tdsReady(); S.payments = S.tdsReady ? await DB.listAllPayments() : []; } catch { S.tdsReady = false; S.payments = []; } // false = TDS columns not set up yet
     const n = S.invoices.filter(i => ['pending', 'partial'].includes(i.status)).length;
     $('#pending-count').textContent = n || '';
@@ -292,7 +311,7 @@
         ${inv.status === 'draft' || S.notes === null ? '' : `<button class="btn" data-act="follow" data-id="${inv.id}">Follow-up</button>`}
         ${actions(inv)}
       </div>
-      ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
+      ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${' · Place of supply: ' + esc(placeText(inv))}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
       ${paymentsHTML(inv, pays)}
       <div class="previewwrap"><div class="scale" id="vscale">${paperHTML(inv)}</div></div>`, { wide: true });
     $('#m-close', m).onclick = closeModal;
@@ -316,6 +335,7 @@
     if (src && !isEdit) { // duplicate: fresh number/date/status
       Object.assign(E, { id: undefined, number: undefined, issue_date: today(), due_date: addDays(today(), st.default_due_days), status: 'pending', amount_paid: 0, paid_date: null, cancel_reason: null, imported: false, signed_by: null });
     }
+    E.place_of_supply = E.place_of_supply || DEFAULT_PLACE;
     E.signed_by = isEdit ? (E.signed_by || st.signer_name) : (st.sign_by_login ? S.user.name : st.signer_name);
     const peek = isReal ? E.number : await DB.peekNumber();
     E.number_preview = peek; if (!isReal) E.number = peek + ' (auto)';
@@ -337,6 +357,7 @@
         <div><label>Email (not printed)</label><input id="f-email" value="${esc(cli.email || '')}"></div>
         <div><label>Phone (not printed)</label><input id="f-phone" value="${esc(cli.phone || '')}"></div></div>
         <p class="muted small" id="client-hint"></p>
+        ${S.placeReady ? `<label>Place of supply</label><select id="f-place">${STATES.map(([n, c], k) => `<option value="${esc(n)}" ${n === E.place_of_supply ? 'selected' : ''}>${esc(n)} (${c})</option>${k === 0 ? '<option disabled>──────────</option>' : ''}`).join('')}${STATES.some(x => x[0] === E.place_of_supply) ? '' : `<option selected>${esc(E.place_of_supply)}</option>`}</select><p class="muted small" id="place-hint" style="margin:4px 0 0"></p>` : ''}
       </div>
       <div class="card"><h3>Line items</h3><div id="items"></div>
         <button class="btn sm" id="add-item">+ Add line</button>
@@ -354,7 +375,7 @@
     const bind = () => {
       E.brand_id = $('#f-brand').value; E.issue_date = $('#f-date').value; E.due_date = $('#f-due').value || null;
       E.client_name = $('#f-client').value; E.client_address = $('#f-addr').value; E.client_gst = $('#f-gst').value;
-      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value; if ($('#f-project')) E.project_id = $('#f-project').value || null;
+      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value; if ($('#f-place')) E.place_of_supply = $('#f-place').value; if ($('#f-project')) E.project_id = $('#f-project').value || null;
       if ($('#f-disc')) E.discount = Number($('#f-disc').value) || 0;
       if ($('#f-tax')) E.tax_rate = Number($('#f-tax').value) || 0;
       const t = totals(E); Object.assign(E, { subtotal: t.subtotal, tax: t.tax, total: t.total });
@@ -364,27 +385,34 @@
     };
     const drawItems = () => {
       $('#items').innerHTML = `<table class="items-edit"><tr class="small muted"><td>Description</td><td style="width:84px">Unit ₹</td><td style="width:58px">Qty</td><td style="width:92px">Total ₹</td><td></td></tr>${E.items.map((it, n) => `
-        <tr data-n="${n}"><td><textarea rows="1" data-k="desc" placeholder="Description">${esc(it.desc)}</textarea></td>
-        <td><input data-k="unit" type="number" step="0.01" value="${it.unit ?? ''}"></td>
-        <td><input data-k="qty" type="number" step="0.01" value="${it.qty ?? ''}"></td>
-        <td><input data-k="total" type="number" step="0.01" value="${lineTotal(it) || ''}" title="Calculated; type here to override"></td>
+        <tr data-n="${n}"><td><textarea rows="1" data-k="desc" placeholder="Description">${esc(it.desc)}</textarea>${S.settings.hsn_enabled ? `<input data-k="code" list="hsn-list" placeholder="HSN / SAC (optional)" value="${esc(it.code || '')}" style="margin-top:4px">` : ''}</td>
+        <td data-l="Unit ₹"><input data-k="unit" type="number" step="0.01" value="${it.unit ?? ''}"></td>
+        <td data-l="Qty"><input data-k="qty" type="number" step="0.01" value="${it.qty ?? ''}"></td>
+        <td data-l="Total ₹"><input data-k="total" type="number" step="0.01" value="${lineTotal(it) || ''}" title="Calculated; type here to override"></td>
         <td><button class="x" data-del="${n}" title="Remove">×</button></td></tr>`).join('')}</table>`;
     };
+    if (S.settings.hsn_enabled) $('#items').insertAdjacentHTML('afterend', `<datalist id="hsn-list">${(S.settings.hsn_codes || []).map(c => `<option value="${esc(c.code)}">${esc(c.desc || '')}</option>`).join('')}</datalist>`);
     drawItems(); bind();
+    let placeTouched = isReal;   // a hand-picked or existing place is never overwritten by the GSTIN / address suggestion
+    const autoPlace = () => { const sel = $('#f-place'); if (!sel || placeTouched) return; const sug = suggestPlace($('#f-gst').value, $('#f-addr').value), want = sug || DEFAULT_PLACE; if (sel.value !== want && [...sel.options].some(o => o.value === want)) sel.value = want; $('#place-hint').textContent = sug && sug !== DEFAULT_PLACE ? `Suggested from the client's GSTIN / address: ${sug}. Change it if the supply is elsewhere.` : ''; };
     const form = $('.form');
     form.addEventListener('input', e => {
       const tr = e.target.closest('tr[data-n]');
       if (tr) { // line item edit
         const it = E.items[+tr.dataset.n], k = e.target.dataset.k;
         if (k === 'desc') it.desc = e.target.value;
+        else if (k === 'code') { const v = e.target.value.trim(); if (v) it.code = v; else delete it.code; }
         else if (k === 'total') it.total = e.target.value === '' ? undefined : Number(e.target.value);
         else { it[k] = e.target.value === '' ? '' : Number(e.target.value); delete it.total; $('[data-k=total]', tr).value = lineTotal(it) || ''; }
       }
       if (e.target.id === 'f-date' && !isReal) { $('#f-due').value = addDays($('#f-date').value, st.default_due_days); }
+      if (e.target.id === 'f-place') { placeTouched = true; $('#place-hint').textContent = ''; }
+      if (['f-gst', 'f-addr'].includes(e.target.id)) autoPlace();
       if (e.target.id === 'f-client') {
         const c = S.clients.find(x => x.name.toLowerCase() === e.target.value.trim().toLowerCase());
         if (c) { E.client_id = c.id; $('#f-addr').value = c.address || ''; $('#f-gst').value = c.gst_no || ''; $('#f-email').value = c.email || ''; $('#f-phone').value = c.phone || ''; $('#client-hint').textContent = 'Existing client loaded.'; }
         else { E.client_id = null; $('#client-hint').textContent = e.target.value ? 'New client: it will be saved for next time.' : ''; }
+        autoPlace();
       }
       bind();
     });
@@ -409,6 +437,7 @@
           issue_date: E.issue_date, due_date: E.due_date, items: E.items.filter(i => i.desc.trim() || lineTotal(i)), subtotal: E.subtotal, discount: E.discount || 0,
           tax_rate: E.tax_rate || 0, tax: E.tax || 0, total: E.total, notes: E.notes, signed_by: E.signed_by,
         };
+        if (S.placeReady) row.place_of_supply = E.place_of_supply || DEFAULT_PLACE;
         if (S.projects !== null) row.project_id = E.project_id || null; // only once the project tables exist
         let saved;
         if (asDraft) {
@@ -621,6 +650,7 @@
       return;
     }
     const st = S.settings;
+    const hsn = ((st.hsn_codes || [])).map(c => ({ ...c }));
     const ck = (id, v, label) => `<label class="check"><input type="checkbox" id="${id}" ${v ? 'checked' : ''}> ${label}</label>`;
     const fld = (id, label, v, type = 'text') => `<div><label>${label}</label><input id="${id}" type="${type}" value="${esc(v)}"></div>`;
     $('#view').innerHTML = `<div class="bar"><h2 class="grow" style="margin:0">Admin</h2><button class="btn" id="lock">Lock</button></div>
@@ -631,6 +661,10 @@
       <div class="card"><h3>Bank details &amp; signature</h3><div class="row c3">${fld('s-bank', 'Bank', st.bank_name)}${fld('s-accname', 'Account name', st.account_name)}${fld('s-accno', 'Account no.', st.account_no)}${fld('s-ifsc', 'IFSC', st.ifsc)}${fld('s-gst', 'GST no. (printed under Pay to)', st.gst_no)}${fld('s-signco', 'Company line under signature', st.signer_company)}</div>
         <div class="row c2">${fld('s-signer', 'Default signed by', st.signer_name)}</div>
         ${ck('s-byuser', st.sign_by_login, 'Sign each invoice with the name of whoever is logged in (Abhijith / Meha) instead of the default')}</div>
+      <div class="card"><h3>HSN / SAC codes on invoices</h3>
+        ${'hsn_enabled' in st ? ck('s-hsn', st.hsn_enabled, 'Show an HSN / SAC code on each line item (off by default)') : '<p class="muted small">This needs a one-time database update: run <code>supabase/migration-place-hsn.sql</code>, then reload.</p>'}
+        <p class="muted small">When on, each line item gets an optional code box, and the code prints in small grey text under the description. Add the codes you actually use below and they appear as suggestions. Codes starting with 99 are SAC (services); the rest are HSN (goods). Please verify every code with your CA or the GST portal.</p>
+        <div id="hsn-lib"></div><button class="btn sm" id="hsn-add" ${'hsn_enabled' in st ? '' : 'disabled'}>+ Add a code</button></div>
       <div class="card"><h3>Optional invoice lines</h3>${ck('s-disc', st.discount_enabled, 'Enable discount line')}${ck('s-gston', st.gst_enabled, 'Enable GST line')}
         <div style="max-width:200px">${fld('s-gstrate', 'Default GST rate (%)', st.gst_rate, 'number')}</div>
         <p class="muted small">You are on the GST composition scheme, so leave both off. They only affect new or edited invoices.</p></div>
@@ -644,12 +678,18 @@
       <div class="card"><h3>Change admin PIN</h3><div class="row c3">${fld('pin-old', 'Current PIN', '', 'text')}${fld('pin-new', 'New PIN (min 4 digits)', '', 'text')}<div><label>&nbsp;</label><button class="btn" id="pin-save">Change PIN</button></div></div></div>`;
     DB.peekNumber().then(n => ($('#next-no') && ($('#next-no').textContent = n)));
     $('#lock').onclick = () => { S.unlocked = false; viewAdmin(); };
+    const drawHsn = () => ($('#hsn-lib').innerHTML = hsn.map((c, n) => `<div class="srow" style="display:grid;grid-template-columns:120px 1fr 36px;gap:8px;margin:4px 0"><input data-hc="${n}" value="${esc(c.code)}" placeholder="Code, e.g. 999293"><input data-hd="${n}" value="${esc(c.desc || '')}" placeholder="What it is for (your note)"><button class="btn sm danger" data-hx="${n}">×</button></div>`).join('') || '<p class="muted small">No codes added yet.</p>');
+    drawHsn();
+    $('#hsn-lib').oninput = e => { const d = e.target.dataset; if (d.hc !== undefined) hsn[d.hc].code = e.target.value.replace(/\s/g, ''); if (d.hd !== undefined) hsn[d.hd].desc = e.target.value; };
+    $('#hsn-lib').onclick = e => { const x = e.target.dataset.hx; if (x !== undefined) { hsn.splice(+x, 1); drawHsn(); } };
+    $('#hsn-add').onclick = () => { hsn.push({ code: '', desc: '' }); drawHsn(); };
     $('#save-set').onclick = guard(async () => {
       S.settings = await DB.saveSettings({
         fy_auto: $('#s-auto').checked, fy_prefix: $('#s-prefix').value.trim(), seq_digits: Number($('#s-digits').value) || 2, default_due_days: Number($('#s-due').value) || 0,
         bank_name: $('#s-bank').value, account_name: $('#s-accname').value, account_no: $('#s-accno').value, ifsc: $('#s-ifsc').value, gst_no: $('#s-gst').value,
         signer_name: $('#s-signer').value, signer_company: $('#s-signco').value, sign_by_login: $('#s-byuser').checked,
         discount_enabled: $('#s-disc').checked, gst_enabled: $('#s-gston').checked, gst_rate: Number($('#s-gstrate').value) || 0,
+        ...('hsn_enabled' in st ? { hsn_enabled: $('#s-hsn').checked, hsn_codes: hsn.filter(c => c.code.trim()).map(c => ({ code: c.code.trim(), type: c.code.trim().startsWith('99') ? 'SAC' : 'HSN', desc: (c.desc || '').trim() })) } : {}),
       });
       toast('Settings saved'); viewAdmin();
     });
@@ -677,8 +717,8 @@
     $('#x-csv').onclick = () => {
       const rows = range().slice().sort((a, b) => a.issue_date.localeCompare(b.issue_date) || a.seq - b.seq); if (!rows.length) return toast('No invoices in that range', true);
       const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by,Chasing,Next follow-up,POC,POC phone,POC email,Last note,TDS withheld,Cash in bank']
-        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by, i.follow_up_owner, dmy(i.next_follow_up), i.poc_name, i.poc_phone, i.poc_email, (notesOf(i)[0] || {}).note, (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0), Number(i.amount_paid || 0) - (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0)].map(q).join(','))).join('\n');
+      const csv = ['Invoice no,Date,Client,Items,Subtotal,Discount,Tax,Total,Received,Balance,Status,Due date,Paid date,Created by,Chasing,Next follow-up,POC,POC phone,POC email,Last note,TDS withheld,Cash in bank,Place of supply,HSN/SAC codes']
+        .concat(rows.map(i => [i.number, dmy(i.issue_date), i.client_name, i.items.map(x => x.desc.replace(/\n/g, ' ')).join('; '), i.subtotal, i.discount, i.tax, i.total, i.amount_paid, i.status === 'cancelled' ? 0 : balance(i), i.status, dmy(i.due_date), dmy(i.paid_date), i.created_by, i.follow_up_owner, dmy(i.next_follow_up), i.poc_name, i.poc_phone, i.poc_email, (notesOf(i)[0] || {}).note, (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0), Number(i.amount_paid || 0) - (S.payments || []).filter(p => p.invoice_id === i.id).reduce((a, p) => a + Number(p.tds_amount || 0), 0), placeOf(i), [...new Set(i.items.map(x => x.code).filter(Boolean))].join('; ')].map(q).join(','))).join('\n');
       saveBlob(new Blob(['﻿' + csv], { type: 'text/csv' }), `GFE_invoice_register_${$('#x1').value || 'start'}_to_${$('#x2').value || 'today'}.csv`);
     };
     $('#x-zip').onclick = guard(async () => {
