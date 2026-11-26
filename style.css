@@ -200,3 +200,35 @@ table.list tr.click { cursor: pointer; } table.list tr.click:hover { background:
   .items-edit td[data-l]::before { content: attr(data-l); display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
   .items-edit td:last-child { align-self: end; }
 }
+
+/* scanned signature above the signer's name; the band moves up so the invoice stays on one page */
+.paper .contact .sig { display: block; margin: 0 0 1mm auto; height: 14mm; max-width: 55mm; object-fit: contain; object-position: right; }
+.paper .band.signed { margin-top: 5mm; }
+.sigrow { display: flex; align-items: center; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.sigrow img { height: 44px; max-width: 180px; object-fit: contain; border: 1px dashed var(--line); border-radius: 6px; padding: 2px 6px; background: #fff; }
+.sigrow b { flex: 1; }
+
+/* applied only when an invoice would not fit on one page */
+.paper.snug .body { padding-top: 10mm; }
+.paper.snug .meta, .paper.snug .payto { margin-top: 9mm; }
+.paper.snug table { margin-top: 8mm; }
+.paper.snug .sum { margin-top: 4mm; }
+.paper.snug .band { margin-top: 5mm; }
+.paper.snug .fine { padding-top: 5mm; padding-bottom: 6mm; }
+.paper.tight .body { padding-top: 8mm; }
+.paper.tight .head img { height: 24mm; }
+.paper.tight .head .title { font-size: 19px; margin-top: 2mm; }
+.paper.tight .meta, .paper.tight .payto { margin-top: 6mm; }
+.paper.tight table { margin-top: 6mm; }
+.paper.tight td { padding-top: 1.2mm; padding-bottom: 1.2mm; }
+.paper.tight tr.first td { padding-top: 3mm; }
+.paper.tight .sum { margin-top: 4mm; }
+.paper.tight .band { margin-top: 6mm; height: 16mm; }
+.paper.tight .fine { padding-top: 5mm; padding-bottom: 6mm; }
+.paper.tighter .head img { height: 19mm; }
+.paper.tighter .txt { font-size: 12.5px; line-height: 1.4; }
+.paper.tighter td { font-size: 12.5px; padding-top: .7mm; padding-bottom: .7mm; }
+.paper.tighter .contact { font-size: 12.5px; padding-top: 2mm; }
+.paper.tighter .contact .sig { height: 11mm; }
+.paper.tighter .band { height: 13mm; margin-top: 4mm; }
+.paper.tighter .fine { padding-top: 3mm; padding-bottom: 4mm; font-size: 10px; }

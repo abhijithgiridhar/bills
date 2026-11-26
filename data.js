@@ -86,6 +86,10 @@
     async addInvoiceNote(invoiceId, note, notedOn, author) { return must(await sb.from('invoice_notes').insert({ invoice_id: invoiceId, note, noted_on: notedOn, author }).select().single()); },
     async deleteInvoiceNote(id) { must(await sb.from('invoice_notes').delete().eq('id', id)); },
     async placeReady() { const { error } = await sb.from('invoices').select('place_of_supply').limit(1); return !error; },   // false until migration-place-hsn.sql has been run
+    // Scanned signatures. listSignatures() returns null until migration-pan-signatures.sql has been run.
+    async listSignatures() { const { data, error } = await sb.from('signatures').select('*').order('created_at'); return error ? null : data; },
+    async addSignature(name, image) { return must(await sb.from('signatures').insert({ name, image }).select().single()); },
+    async deleteSignature(id) { must(await sb.from('signatures').delete().eq('id', id)); },
     // TDS on received payments. tdsReady() is false until migration-tds-vendor.sql has been run.
     async tdsReady() { const { error } = await sb.from('payments').select('tds_amount,tds_reviewed').limit(1); return !error; },
     async listAllPayments() { return must(await sb.from('payments').select('*').order('paid_on')); },

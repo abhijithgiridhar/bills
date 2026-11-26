@@ -56,6 +56,33 @@
   const brandOf = id => S.brands.find(b => b.id === id) || S.brands.find(b => b.is_default) || S.brands[0];
   const logoOf = b => b.logo_url || (b.is_default || /games for ed/i.test(b.name) ? 'assets/logo-gfe.png' : '');
 
+  /* ---------- scanned signatures ---------- */
+  const sigOf = inv => (inv.signature_id && S.signatures ? S.signatures.find(x => x.id === inv.signature_id) || null : null);
+  const sigOptions = sel => `<option value="">No signature</option>${(S.signatures || []).map(x => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)}'s signature</option>`).join('')}`;
+  // the name printed under the signature follows the chosen signature, and goes back to the usual signer when it is removed
+  const signerFor = (sigId, current) => { const sig = (S.signatures || []).find(x => x.id === sigId); if (sig) return sig.name; return (S.signatures || []).some(x => x.name === current) ? (S.settings.sign_by_login ? S.user.name : S.settings.signer_name) : current; };
+  // shrink a scan/photo, optionally make the white paper transparent, and crop to the ink
+  async function prepareSignature(file, removeWhite) {
+    if (!/^image\/(png|jpe?g|webp)$/.test(file.type)) throw new Error('Please choose a PNG or JPG image of the signature.');
+    const img = new Image(), url = URL.createObjectURL(file);
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('Could not read that image.')); img.src = url; });
+    URL.revokeObjectURL(url);
+    const k = Math.min(1, 900 / Math.max(img.width, img.height)), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+    const x = c.getContext('2d'); x.drawImage(img, 0, 0, c.width, c.height);
+    const data = x.getImageData(0, 0, c.width, c.height), p = data.data; let L = c.width, T = c.height, R = -1, B = -1;
+    for (let i = 0; i < p.length; i += 4) {
+      const lum = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+      if (removeWhite && lum > 150) p[i + 3] = lum > 200 ? 0 : Math.round(p[i + 3] * (200 - lum) / 50);
+      if (p[i + 3] > 60 && (lum < 200 || !removeWhite)) { const n = i / 4, px = n % c.width, py = Math.floor(n / c.width); if (px < L) L = px; if (px > R) R = px; if (py < T) T = py; if (py > B) B = py; }
+    }
+    if (R < 0) throw new Error('No signature found in that image. Try a clearer scan, or untick "remove white background".');
+    x.putImageData(data, 0, 0);
+    const pad = 6, w = Math.min(c.width, R + pad) - Math.max(0, L - pad), h = Math.min(c.height, B + pad) - Math.max(0, T - pad), s2 = Math.min(1, 600 / w);
+    const out = document.createElement('canvas'); out.width = Math.max(1, Math.round(w * s2)); out.height = Math.max(1, Math.round(h * s2));
+    out.getContext('2d').drawImage(c, Math.max(0, L - pad), Math.max(0, T - pad), w, h, 0, 0, out.width, out.height);
+    return out.toDataURL('image/png');
+  }
+
   /* ---------- the invoice paper ---------- */
   function paperHTML(inv) {
     const b = brandOf(inv.brand_id), st = S.settings, t = totals(inv);
@@ -76,18 +103,27 @@
           <div><div class="lbl">Issued to:</div><div class="txt">${esc(inv.client_name)}${inv.client_address ? '\n' + esc(inv.client_address) : ''}${inv.client_gst ? '\nGST No: ' + esc(inv.client_gst) : ''}\nPlace of supply: ${esc(placeText(inv))}</div></div>
           <div class="no"><div><span class="lbl">Invoice no:</span><b class="v">${esc(inv.number || 'DRAFT')}</b></div><div><span class="lbl">Date:</span><span class="v">${dmy(inv.issue_date)}</span></div></div>
         </div>
-        <div class="payto"><div class="lbl">Pay to:</div><div class="txt">${esc(st.bank_name)}\nAccount Name: ${esc(st.account_name)}\nAccount No.: ${esc(st.account_no)}\nIFSC Code: ${esc(st.ifsc)}\nGST : ${esc(st.gst_no)}</div></div>
+        <div class="payto"><div class="lbl">Pay to:</div><div class="txt">${esc(st.bank_name)}\nAccount Name: ${esc(st.account_name)}\nAccount No.: ${esc(st.account_no)}\nIFSC Code: ${esc(st.ifsc)}\nGST : ${esc(st.gst_no)}${st.pan_no ? '\nPAN : ' + esc(st.pan_no) : ''}</div></div>
         <table><thead><tr><th>Description</th><th>Unit price</th><th>Qty</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
         <div class="sum">${extra.join('')}<div class="tot"><span class="lbl">Total</span><b>${fmt(t.total)}</b></div></div>
         ${inv.notes ? `<div class="notes">${esc(inv.notes)}</div>` : ''}
       </div>
-      <div class="band"><span>THANK YOU</span></div>
-      <div class="contact"><div>${esc(b.email)}<br>${esc(b.phone)}</div><div class="rt">${esc(inv.signed_by || st.signer_name)}<br>${esc(st.signer_company)}</div></div>
+      <div class="band ${sigOf(inv) ? 'signed' : ''}"><span>THANK YOU</span></div>
+      <div class="contact"><div>${esc(b.email)}<br>${esc(b.phone)}</div><div class="rt">${sigOf(inv) ? `<img class="sig" src="${esc(sigOf(inv).image)}" alt="Signature">` : ''}${esc(inv.signed_by || st.signer_name)}<br>${esc(st.signer_company)}</div></div>
       <div class="fine">${esc(b.footer_text)}</div>
     </div>`;
   }
 
   // Renders the invoice inside its own iframe so page scroll / window size / browser quirks cannot shift or clip it.
+  // If an invoice would run past one A4 page (many line items), tighten its spacing so the footer is never split across pages.
+  function fitPaper(root) {
+    const paper = root && (root.classList.contains('paper') ? root : root.querySelector('.paper')); if (!paper || !paper.offsetWidth) return;
+    paper.classList.remove('snug', 'tight', 'tighter');
+    const over = () => paper.offsetHeight > paper.offsetWidth * 297 / 210 + 1;
+    // step 1 only trims blank space (logo and text unchanged); steps 2 and 3 are for long invoices with many lines
+    for (const level of ['snug', 'tight', 'tighter']) if (over()) paper.classList.add(level);
+  }
+
   async function renderPDF(inv) {
     const fr = document.createElement('iframe');
     fr.setAttribute('aria-hidden', 'true');
@@ -106,6 +142,7 @@
       await doc.fonts.ready;
       await Promise.all($$('img', doc).map(im => (im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; }))));
       const paper = $('.paper', doc);
+      fitPaper(paper);
       const canvas = await html2canvas(paper, { scale: 2, useCORS: true, backgroundColor: '#fff', scrollX: 0, scrollY: 0, windowWidth: 900, windowHeight: Math.max(1200, paper.offsetHeight) });
       const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4' });
       const img = canvas.toDataURL('image/jpeg', 0.97), h = 210 * canvas.height / canvas.width;
@@ -120,7 +157,7 @@
   }
   const downloadPDF = guard(async inv => { toast('Preparing PDF…'); saveBlob(await renderPDF(inv), pdfName(inv)); toast('Downloaded'); });
   async function printInvoice(inv) {
-    const p = document.createElement('div'); p.id = 'print-root'; p.innerHTML = paperHTML(inv); document.body.appendChild(p);
+    const p = document.createElement('div'); p.id = 'print-root'; p.innerHTML = paperHTML(inv); document.body.appendChild(p); fitPaper(p);
     await document.fonts.ready; await new Promise(r => setTimeout(r, 300));
     window.print(); setTimeout(() => p.remove(), 500);
   }
@@ -142,6 +179,7 @@
     [S.settings, S.brands, S.clients, S.invoices] = await Promise.all([DB.getSettings(), DB.listBrands(), DB.listClients(), DB.listInvoices()]);
     try { S.projects = await DB.listProjectsLite(); } catch { S.projects = null; } // null = project tables not set up yet
     try { S.notes = await DB.listInvoiceNotes(); S.team = await DB.listTeam(); } catch { S.notes = null; } // null = follow-up tables not set up yet
+    try { S.signatures = await DB.listSignatures(); } catch { S.signatures = null; }          // null = signature table not set up yet
     try { S.placeReady = await DB.placeReady(); } catch { S.placeReady = false; }   // false = place_of_supply column not set up yet
     try { S.tdsReady = await DB.tdsReady(); S.payments = S.tdsReady ? await DB.listAllPayments() : []; } catch { S.tdsReady = false; S.payments = []; } // false = TDS columns not set up yet
     const n = S.invoices.filter(i => ['pending', 'partial'].includes(i.status)).length;
@@ -310,12 +348,19 @@
         ${inv.status === 'draft' ? '' : `<button class="btn" data-act="share" data-id="${inv.id}">Share</button>`}
         ${inv.status === 'draft' || S.notes === null ? '' : `<button class="btn" data-act="follow" data-id="${inv.id}">Follow-up</button>`}
         ${actions(inv)}
+        ${inv.status !== 'cancelled' && S.signatures && S.signatures.length ? `<select id="v-sig" style="width:auto">${sigOptions(inv.signature_id)}</select>` : ''}
       </div>
       ${inv.status === 'draft' ? `<p class="muted small">Draft · no invoice number yet (assigned when you finalise) · Total ₹${fmt(inv.total)}${inv.created_by ? ' · Started by ' + esc(inv.created_by) : ''}</p>` : `<p class="muted small">Total ₹${fmt(inv.total)} · Received ₹${fmt(inv.amount_paid)} · Balance ₹${fmt(balance(inv))}${inv.due_date ? ' · Due ' + dmy(inv.due_date) : ''}${inv.cancel_reason ? ' · Cancelled: ' + esc(inv.cancel_reason) : ''}${' · Place of supply: ' + esc(placeText(inv))}${inv.created_by ? ' · Created by ' + esc(inv.created_by) : ''}${inv.project_id && S.projects ? ' · Project: ' + esc((S.projects.find(p => p.id === inv.project_id) || {}).name || '') : ''}</p>`}
       ${paymentsHTML(inv, pays)}
       <div class="previewwrap"><div class="scale" id="vscale">${paperHTML(inv)}</div></div>`, { wide: true });
     $('#m-close', m).onclick = closeModal;
     wireActions(m);
+    if ($('#v-sig', m)) $('#v-sig', m).onchange = guard(async e => {
+      const id = e.target.value || null;
+      await DB.updateInvoice(inv.id, { signature_id: id, signed_by: signerFor(id, inv.signed_by || S.settings.signer_name) });
+      await refresh(); toast(id ? 'Signature added' : 'Signature removed'); await viewInvoice(S.invoices.find(i => i.id === inv.id));
+    });
+    fitPaper($('#vscale', m));
     const w = $('.previewwrap', m); const z = Math.min(1, (w.clientWidth - 40) / 794); $('#vscale', m).style.zoom = z;
   }
 
@@ -333,7 +378,7 @@
       items: [{ desc: '', qty: 1, unit: '' }], discount: 0, tax_rate: st.gst_rate, notes: '', status: 'pending', amount_paid: 0,
     };
     if (src && !isEdit) { // duplicate: fresh number/date/status
-      Object.assign(E, { id: undefined, number: undefined, issue_date: today(), due_date: addDays(today(), st.default_due_days), status: 'pending', amount_paid: 0, paid_date: null, cancel_reason: null, imported: false, signed_by: null });
+      Object.assign(E, { id: undefined, number: undefined, issue_date: today(), due_date: addDays(today(), st.default_due_days), status: 'pending', amount_paid: 0, paid_date: null, cancel_reason: null, imported: false, signed_by: null, signature_id: null });
     }
     E.place_of_supply = E.place_of_supply || DEFAULT_PLACE;
     E.signed_by = isEdit ? (E.signed_by || st.signer_name) : (st.sign_by_login ? S.user.name : st.signer_name);
@@ -366,7 +411,8 @@
         <p style="font-size:16px;font-weight:700;margin:14px 0 0">Total: ₹<span id="grand"></span></p>
       </div>
       <div class="card"><h3>Notes (printed under the total, optional)</h3><textarea id="f-notes">${esc(E.notes)}</textarea>
-        <label>Signed by</label><input id="f-signed" value="${esc(E.signed_by)}"></div>
+        <label>Signed by</label><input id="f-signed" value="${esc(E.signed_by)}">
+        ${S.signatures === null ? '' : S.signatures.length ? `<label>Scanned signature</label><select id="f-sig">${sigOptions(E.signature_id)}</select>` : '<p class="muted small">To add a scanned signature, upload one first under <a href="#admin">Admin → Signatures</a>.</p>'}</div>
       <div class="bar">${isReal ? '<button class="btn primary big" id="save">Save changes</button>' : '<button class="btn primary big" id="save">Create invoice</button><button class="btn big" id="save-draft">Save as draft</button>'}${isDraft ? '<button class="btn danger" id="del-draft">Delete draft</button>' : ''}<button class="btn" id="discard">Cancel</button></div>
       ${isReal ? '' : '<p class="muted small">A draft keeps your work without using an invoice number. The number is assigned when you click Create invoice.</p>'}
     </div>
@@ -375,12 +421,12 @@
     const bind = () => {
       E.brand_id = $('#f-brand').value; E.issue_date = $('#f-date').value; E.due_date = $('#f-due').value || null;
       E.client_name = $('#f-client').value; E.client_address = $('#f-addr').value; E.client_gst = $('#f-gst').value;
-      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value; if ($('#f-place')) E.place_of_supply = $('#f-place').value; if ($('#f-project')) E.project_id = $('#f-project').value || null;
+      E.notes = $('#f-notes').value; E.signed_by = $('#f-signed').value; if ($('#f-place')) E.place_of_supply = $('#f-place').value; if ($('#f-sig')) E.signature_id = $('#f-sig').value || null; if ($('#f-project')) E.project_id = $('#f-project').value || null;
       if ($('#f-disc')) E.discount = Number($('#f-disc').value) || 0;
       if ($('#f-tax')) E.tax_rate = Number($('#f-tax').value) || 0;
       const t = totals(E); Object.assign(E, { subtotal: t.subtotal, tax: t.tax, total: t.total });
       $('#grand').textContent = fmt(t.total);
-      $('#pscale').innerHTML = paperHTML(E);
+      $('#pscale').innerHTML = paperHTML(E); fitPaper($('#pscale'));
       const w = $('#pw'); $('#pscale').style.zoom = Math.min(1, (w.clientWidth - 40) / 794);
     };
     const drawItems = () => {
@@ -406,6 +452,7 @@
         else { it[k] = e.target.value === '' ? '' : Number(e.target.value); delete it.total; $('[data-k=total]', tr).value = lineTotal(it) || ''; }
       }
       if (e.target.id === 'f-date' && !isReal) { $('#f-due').value = addDays($('#f-date').value, st.default_due_days); }
+      if (e.target.id === 'f-sig') $('#f-signed').value = signerFor(e.target.value, $('#f-signed').value);
       if (e.target.id === 'f-place') { placeTouched = true; $('#place-hint').textContent = ''; }
       if (['f-gst', 'f-addr'].includes(e.target.id)) autoPlace();
       if (e.target.id === 'f-client') {
@@ -438,6 +485,7 @@
           tax_rate: E.tax_rate || 0, tax: E.tax || 0, total: E.total, notes: E.notes, signed_by: E.signed_by,
         };
         if (S.placeReady) row.place_of_supply = E.place_of_supply || DEFAULT_PLACE;
+        if (S.signatures !== null) row.signature_id = E.signature_id || null;
         if (S.projects !== null) row.project_id = E.project_id || null; // only once the project tables exist
         let saved;
         if (asDraft) {
@@ -658,9 +706,14 @@
         ${ck('s-auto', st.fy_auto, 'Switch financial year automatically on 1 April (FY 2027-28 becomes 2827, first bill 282701)')}
         <div class="row c3">${fld('s-prefix', 'FY prefix (used when auto is off)', st.fy_prefix)}${fld('s-digits', 'Running-number digits', st.seq_digits, 'number')}${fld('s-due', 'Default payment terms (days)', st.default_due_days, 'number')}</div>
         <p class="muted small">Next invoice number: <b id="next-no">…</b>. Changing the prefix starts a new sequence at 01. Numbers are never reused.</p></div>
-      <div class="card"><h3>Bank details &amp; signature</h3><div class="row c3">${fld('s-bank', 'Bank', st.bank_name)}${fld('s-accname', 'Account name', st.account_name)}${fld('s-accno', 'Account no.', st.account_no)}${fld('s-ifsc', 'IFSC', st.ifsc)}${fld('s-gst', 'GST no. (printed under Pay to)', st.gst_no)}${fld('s-signco', 'Company line under signature', st.signer_company)}</div>
+      <div class="card"><h3>Bank details &amp; signature</h3><div class="row c3">${fld('s-bank', 'Bank', st.bank_name)}${fld('s-accname', 'Account name', st.account_name)}${fld('s-accno', 'Account no.', st.account_no)}${fld('s-ifsc', 'IFSC', st.ifsc)}${fld('s-gst', 'GST no. (printed under Pay to)', st.gst_no)}${'pan_no' in st ? fld('s-pan', 'PAN (printed under Pay to)', st.pan_no) : ''}${fld('s-signco', 'Company line under signature', st.signer_company)}</div>
         <div class="row c2">${fld('s-signer', 'Default signed by', st.signer_name)}</div>
         ${ck('s-byuser', st.sign_by_login, 'Sign each invoice with the name of whoever is logged in (Abhijith / Meha) instead of the default')}</div>
+      <div class="card"><h3>Scanned signatures</h3>
+        ${S.signatures === null ? '<p class="muted small">This needs a one-time database update: run <code>supabase/migration-pan-signatures.sql</code>, then reload.</p>' : `<p class="muted small">Upload a scan or clear photo of a signature on white paper. It is only added to an invoice when you choose it there. Anyone signed in to this tool can choose any signature listed here, so only upload with that person's agreement.</p>
+        <div id="sig-list"></div>
+        <div class="row c3"><div><label>Name printed under it</label><input id="sig-name" placeholder="e.g. Meha Wadher"></div><div><label>Image (PNG or JPG)</label><input id="sig-file" type="file" accept="image/png,image/jpeg,image/webp"></div><div><label>&nbsp;</label><button class="btn" id="sig-add">Add signature</button></div></div>
+        ${ck('sig-clean', true, 'Remove the white paper background')}`}</div>
       <div class="card"><h3>HSN / SAC codes on invoices</h3>
         ${'hsn_enabled' in st ? ck('s-hsn', st.hsn_enabled, 'Show an HSN / SAC code on each line item (off by default)') : '<p class="muted small">This needs a one-time database update: run <code>supabase/migration-place-hsn.sql</code>, then reload.</p>'}
         <p class="muted small">When on, each line item gets an optional code box, and the code prints in small grey text under the description. Add the codes you actually use below and they appear as suggestions. Codes starting with 99 are SAC (services); the rest are HSN (goods). Please verify every code with your CA or the GST portal.</p>
@@ -680,6 +733,23 @@
     $('#lock').onclick = () => { S.unlocked = false; viewAdmin(); };
     const drawHsn = () => ($('#hsn-lib').innerHTML = hsn.map((c, n) => `<div class="srow" style="display:grid;grid-template-columns:120px 1fr 36px;gap:8px;margin:4px 0"><input data-hc="${n}" value="${esc(c.code)}" placeholder="Code, e.g. 999293"><input data-hd="${n}" value="${esc(c.desc || '')}" placeholder="What it is for (your note)"><button class="btn sm danger" data-hx="${n}">×</button></div>`).join('') || '<p class="muted small">No codes added yet.</p>');
     drawHsn();
+    if (S.signatures !== null) {
+      const drawSigs = () => ($('#sig-list').innerHTML = S.signatures.map(x => `<div class="sigrow"><img src="${esc(x.image)}" alt=""><b>${esc(x.name)}</b><button class="btn sm danger" data-sigdel="${x.id}">Delete</button></div>`).join('') || '<p class="muted small">No signatures added yet.</p>');
+      drawSigs();
+      $('#sig-add').onclick = guard(async () => {
+        const name = $('#sig-name').value.trim(), file = $('#sig-file').files[0];
+        if (!name) return toast('Enter the name to print under the signature', true);
+        if (!file) return toast('Choose the signature image', true);
+        await DB.addSignature(name, await prepareSignature(file, $('#sig-clean').checked));
+        S.signatures = await DB.listSignatures(); drawSigs(); $('#sig-name').value = ''; $('#sig-file').value = ''; toast('Signature added');
+      });
+      $('#sig-list').onclick = guard(async e => {
+        const id = e.target.dataset.sigdel; if (!id) return;
+        const used = S.invoices.filter(i => i.signature_id === id).length;
+        if (!confirm(used ? `Delete this signature? ${used} invoice(s) that carry it will become unsigned.` : 'Delete this signature?')) return;
+        await DB.deleteSignature(id); await refresh(); drawSigs(); toast('Signature deleted');
+      });
+    }
     $('#hsn-lib').oninput = e => { const d = e.target.dataset; if (d.hc !== undefined) hsn[d.hc].code = e.target.value.replace(/\s/g, ''); if (d.hd !== undefined) hsn[d.hd].desc = e.target.value; };
     $('#hsn-lib').onclick = e => { const x = e.target.dataset.hx; if (x !== undefined) { hsn.splice(+x, 1); drawHsn(); } };
     $('#hsn-add').onclick = () => { hsn.push({ code: '', desc: '' }); drawHsn(); };
@@ -687,7 +757,7 @@
       S.settings = await DB.saveSettings({
         fy_auto: $('#s-auto').checked, fy_prefix: $('#s-prefix').value.trim(), seq_digits: Number($('#s-digits').value) || 2, default_due_days: Number($('#s-due').value) || 0,
         bank_name: $('#s-bank').value, account_name: $('#s-accname').value, account_no: $('#s-accno').value, ifsc: $('#s-ifsc').value, gst_no: $('#s-gst').value,
-        signer_name: $('#s-signer').value, signer_company: $('#s-signco').value, sign_by_login: $('#s-byuser').checked,
+        ...($('#s-pan') ? { pan_no: $('#s-pan').value.trim().toUpperCase() } : {}), signer_name: $('#s-signer').value, signer_company: $('#s-signco').value, sign_by_login: $('#s-byuser').checked,
         discount_enabled: $('#s-disc').checked, gst_enabled: $('#s-gston').checked, gst_rate: Number($('#s-gstrate').value) || 0,
         ...('hsn_enabled' in st ? { hsn_enabled: $('#s-hsn').checked, hsn_codes: hsn.filter(c => c.code.trim()).map(c => ({ code: c.code.trim(), type: c.code.trim().startsWith('99') ? 'SAC' : 'HSN', desc: (c.desc || '').trim() })) } : {}),
       });
